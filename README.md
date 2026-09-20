@@ -70,6 +70,26 @@ Grobe Eichung des Kurvigkeitsmaßes in Grad Richtungswechsel je Kilometer:
 | ~330 | kleines Sträßchen, viel Kurbelei | 4 |
 | ~450 | Passstraße, Serpentinen | 5 |
 
+### Warum das Straßennetz nötig ist
+
+Wegpunkte geometrisch auf einen Kreis zu würfeln funktioniert nur, wo überall
+Straßen sind. Im Gebirge landen sie auf Waldwegen, in Sackgassentälern oder
+ganz ohne Straße in der Nähe – der Router bricht dann mit „target island
+detected" ab oder fährt Seitentäler rein und auf demselben Weg wieder raus.
+
+Simulation eines Talsystems (Rundkurs aus Straßen, ringsum Berg), 20 Durchläufe
+à drei Varianten:
+
+| | blind | mit Straßenwissen |
+|---|---:|---:|
+| Suche erfolgreich | 0 / 20 | **20 / 20** |
+| Varianten im Schnitt | 0,0 | **3,0** |
+| Doppeltfahren (Median) | – | **0 %** |
+| abgelehnte Wegpunkte | 240 | **14** |
+
+Fällt Overpass aus, arbeitet die App blind weiter und sagt es in der
+Oberfläche. Abschalten lässt es sich in den Feineinstellungen.
+
 ## Routing-Dienste
 
 **BRouter** (Voreinstellung) – kostenlos, ohne Anmeldung, läuft auf
@@ -99,9 +119,13 @@ Ehrlichkeitshalber:
 - **Sie kennt keine Straßenqualität.** Ob der Belag taugt oder die Straße
   gesperrt ist, weiß nur OpenStreetMap – und das nicht immer.
 - **Öffentliche Server, fair genutzt.** Zwischen den Anfragen liegt eine Pause,
-  die Ortssuche hält das Limit von Nominatim ein (eine Anfrage je Sekunde). Wer
-  die App dauerhaft oder für viele Leute betreibt, sollte einen eigenen
-  BRouter-Server aufsetzen.
+  die Ortssuche hält das Limit von Nominatim ein (eine Anfrage je Sekunde), das
+  Straßennetz wird einmal je Suche geholt und zwischengespeichert. Wer die App
+  dauerhaft oder für viele Leute betreibt, sollte einen eigenen BRouter-Server
+  aufsetzen.
+- **Manchmal gibt es keine Runde.** In einem engen Alpental existiert in zwei
+  Stunden schlicht kein Rundkurs. Dann bleibt ein Rest Doppeltfahren übrig – die
+  App versteckt das nicht, sondern schreibt den Prozentwert in den Steckbrief.
 - **Höhenprofil nur, wenn der Dienst Höhen liefert.** BRouter tut das, bei
   GraphHopper ist `elevation` eingeschaltet.
 
@@ -115,14 +139,14 @@ außen gehen nur die Anfragen an den gewählten Routing-Dienst, an Nominatim
 ## Tests
 
 ```bash
-npm test                                            # 29 Unit-Tests, ohne Netz
+npm test                                            # 54 Unit-Tests, ohne Netz
 NODE_PATH=$(npm root -g) node test/browser/smoke.mjs # kompletter Ablauf im Browser
 ```
 
 Der Browser-Test startet den Server, fängt alle Netzaufrufe ab (Kacheln,
 Ortssuche, BRouter liefern simulierte Antworten) und spielt den ganzen Ablauf
 durch – Start setzen, generieren, Varianten wechseln, Höhenprofil antippen, GPX
-herunterladen, Einwegstrecke, Fehlerfall. Screenshots landen in
+herunterladen, Einwegstrecke, Overpass-Ausfall, Fehlerfall. Screenshots landen in
 `test/screenshots/`. Er braucht Playwright.
 
 ## Aufbau
@@ -134,6 +158,7 @@ assets/js/
   app.js                Bedienung und Ablaufsteuerung
   generator.js          Wegpunkte erzeugen, nachjustieren, Varianten bewerten
   routers.js            BRouter- und GraphHopper-Adapter, Ortssuche
+  roads.js              Straßennetz über Overpass, Wegpunkte aufschnappen
   geo.js                Geodäsie, Kurvigkeit, Höhenstatistik, Überlappung
   elevation.js          Höhenprofil als Inline-SVG
   mapview.js            Leaflet-Hülle
@@ -148,7 +173,8 @@ vendor/leaflet/         Leaflet 1.9.4, mitgeliefert statt per CDN
 Karten und Routing beruhen auf [OpenStreetMap](https://www.openstreetmap.org/copyright)
 (ODbL). Kacheln von OpenStreetMap und [OpenTopoMap](https://opentopomap.org)
 (CC-BY-SA), Routing von [BRouter](https://brouter.de) bzw. GraphHopper,
-Ortssuche von [Nominatim](https://nominatim.openstreetmap.org).
+Ortssuche von [Nominatim](https://nominatim.openstreetmap.org), Straßennetz
+über [Overpass](https://overpass-api.de).
 [Leaflet](https://leafletjs.com) steht unter BSD-2-Clause (siehe
 `vendor/leaflet/LICENSE`).
 

@@ -78,7 +78,7 @@ export function classifyBRouterMessage(text) {
   return { kind: 'other', section: null, message: `BRouter: ${t}` };
 }
 
-async function fetchWithTimeout(url, options = {}, timeoutMs = DEFAULT_TIMEOUT_MS) {
+export async function fetchWithTimeout(url, options = {}, timeoutMs = DEFAULT_TIMEOUT_MS) {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeoutMs);
   const outerSignal = options.signal;

@@ -11,6 +11,7 @@ import {
   targetDistanceM,
 } from '../assets/js/generator.js';
 import { bearing, destination, distance, overlapDetail } from '../assets/js/geo.js';
+import { snapWaypoints } from '../assets/js/roads.js';
 import { FakeRouter } from './fake-router.mjs';
 
 const START = [8.4117, 48.4636]; // Freudenstadt
@@ -318,4 +319,78 @@ test('Gleiche Fehler mehrerer Varianten werden zusammengefasst', async () => {
     // Höchstens eine Zeile je Fehlerursache, nicht eine je Variante.
     assert.ok(new Set(ok.warnings).size === ok.warnings.length);
   }
+});
+
+
+/* ------------------------------- Wegpunkte auf echte Strassen (Snapping) */
+
+/**
+ * Ein Talsystem, wie es im Gebirge aussieht: ein Rundkurs aus Strassen, eine
+ * Zufahrt vom Start dorthin -- und ringsum nichts als Berg.
+ */
+function talsystem(start) {
+  const punkte = [];
+  const ecken = [0, 55, 130, 190, 250, 305].map((grad, i) =>
+    destination(start, grad, i % 2 ? 11000 : 14000),
+  );
+  const strecke = (a, b) => {
+    const schritte = Math.max(2, Math.round(distance(a, b) / 400));
+    for (let s = 0; s <= schritte; s++) {
+      punkte.push([a[0] + (b[0] - a[0]) * (s / schritte), a[1] + (b[1] - a[1]) * (s / schritte)]);
+    }
+  };
+  for (let i = 0; i < ecken.length; i++) strecke(ecken[i], ecken[(i + 1) % ecken.length]);
+  strecke(start, ecken[0]); // Zufahrt
+  return punkte;
+}
+
+test('Im Talsystem rettet erst das Snapping die Runde', async () => {
+  const korridore = talsystem(START);
+  const roads = korridore.map((point) => ({ point, highway: 'tertiary' }));
+  const welt = () => new FakeRouter({ wiggle: 0.5, corridors: korridore, corridorWidthM: 700 });
+  const anfrage = {
+    start: START,
+    mode: 'loop',
+    durationMin: 120,
+    curviness: 4,
+    variants: 3,
+    seed: 57,
+  };
+
+  const blind = welt();
+  const ohne = await generateRoutes(anfrage, { router: blind, ...fast }).catch(() => null);
+
+  const sehend = welt();
+  const mit = await generateRoutes(anfrage, {
+    router: sehend,
+    ...fast,
+    snap: (wps) => snapWaypoints(wps, roads, { curviness: anfrage.curviness }),
+  }).catch(() => null);
+
+  assert.ok(mit, 'mit Strassenwissen muss eine Route herauskommen');
+  assert.ok(
+    sehend.rejections < blind.rejections,
+    `Snapping muss Fehlschlaege senken: blind ${blind.rejections}, mit ${sehend.rejections}`,
+  );
+  assert.ok(
+    !ohne || mit.candidates.length >= ohne.candidates.length,
+    'und mindestens so viele Varianten liefern',
+  );
+});
+
+test('Snapping haelt die Wegpunkte auf der Strasse', async () => {
+  const korridore = talsystem(START);
+  const roads = korridore.map((point) => ({ point, highway: 'tertiary' }));
+  const { best } = await generateRoutes(
+    { start: START, mode: 'loop', durationMin: 120, curviness: 3, variants: 1, seed: 12 },
+    {
+      router: new FakeRouter({ wiggle: 0.4, corridors: korridore }),
+      ...fast,
+      snap: (wps) => snapWaypoints(wps, roads, { curviness: 3 }),
+    },
+  );
+  const abseits = best.waypoints.filter(
+    (wp) => !korridore.some((c) => distance(wp, c) < 700),
+  );
+  assert.equal(abseits.length, 0, `${abseits.length} Wegpunkte liegen im Gelaende`);
 });

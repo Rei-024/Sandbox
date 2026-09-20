@@ -114,6 +114,29 @@ try {
   });
 
   let routingCalls = 0;
+  let overpassCalls = 0;
+
+  // Strassennetz: ein Ring aus Nebenstrassen um Freudenstadt.
+  await context.route('**/api/interpreter', (r) => {
+    overpassCalls++;
+    const elements = [];
+    for (let ring = 6000; ring <= 22000; ring += 4000) {
+      for (let grad = 0; grad < 360; grad += 9) {
+        const p = destination([8.4117, 48.4636], grad, ring);
+        elements.push({
+          type: 'way',
+          id: elements.length,
+          center: { lat: p[1], lon: p[0] },
+          tags: { highway: grad % 27 === 0 ? 'secondary' : 'tertiary' },
+        });
+      }
+    }
+    return r.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ elements }),
+    });
+  });
   await context.route('**://*.tile.openstreetmap.org/**', (r) =>
     r.fulfill({ status: 200, contentType: 'image/png', body: PIXEL }),
   );
@@ -141,7 +164,10 @@ try {
   const errors = [];
   page.on('pageerror', (e) => errors.push(String(e)));
   page.on('console', (m) => {
-    if (m.type() === 'error' && !/favicon|tile/i.test(m.text())) errors.push(m.text());
+    // "Failed to load resource" ist eine Netzmeldung des Browsers, kein
+    // JS-Fehler -- der Ausfalltest weiter unten loest sie absichtlich aus.
+    const belanglos = /favicon|tile|Failed to load resource/i;
+    if (m.type() === 'error' && !belanglos.test(m.text())) errors.push(m.text());
   });
 
   await page.addInitScript(() => {
@@ -176,7 +202,8 @@ try {
     timeout: 30000,
   });
 
-  check(routingCalls > 0 && routingCalls <= 12, `Routing-Anfragen: ${routingCalls}`);
+  check(overpassCalls === 1, `Strassennetz genau einmal geladen (${overpassCalls}x)`);
+  check(routingCalls > 0 && routingCalls <= 16, `Routing-Anfragen: ${routingCalls}`);
   check((await page.locator('#stats .stat').count()) === 4, 'Vier Kennzahlen im Steckbrief');
   check(
     (await page.locator('#route-variants .chip').count()) === 3,
@@ -246,6 +273,18 @@ try {
     return u.searchParams.get('origin') !== u.searchParams.get('destination');
   });
   check(endsAway, 'Einwegstrecke endet nicht am Start');
+
+  console.log('\n# Strassennetz nicht erreichbar');
+  await context.route('**/api/interpreter', (r) => r.fulfill({ status: 504, body: 'gateway timeout' }));
+  await page.locator('#mode-loop').check({ force: true });
+  await page.locator('#duration').fill('300'); // anderer Suchradius -> nicht aus dem Speicher
+  await page.click('#generate-btn');
+  await page.waitForFunction(() => !document.getElementById('generate-btn').disabled, null, {
+    timeout: 40000,
+  });
+  const netzWarnung = await page.locator('#alert').textContent();
+  check(/Straßennetz/.test(netzWarnung), `Ausfall wird erklaert: "${netzWarnung.slice(0, 70)}…"`);
+  check(await page.locator('#result').isVisible(), 'trotzdem kommt eine Route heraus');
 
   console.log('\n# Fehlerfall');
   await page.locator('#advanced').evaluate((el) => el.setAttribute('open', ''));

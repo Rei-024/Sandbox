@@ -207,7 +207,7 @@ export function dropWaypoint(waypoints, section) {
  * Zweimal verschieben, danach weglassen -- alles aus einem gemeinsamen
  * Anfragebudget, damit ein zaeher Fall nicht den oeffentlichen Server flutet.
  */
-async function routeWithRepair({ waypoints, assemble, anchor, call, rng, budget }) {
+async function routeWithRepair({ waypoints, assemble, anchor, call, rng, budget, snap }) {
   let current = waypoints.slice();
   let attempt = 0;
 
@@ -224,7 +224,9 @@ async function routeWithRepair({ waypoints, assemble, anchor, call, rng, budget 
       // zuverlaessig, und bei fuenf bis neun Wegpunkten faellt einer weniger
       // kaum auf.
       if (attempt === 1) {
-        current = nudgeWaypoints(current, err.section, attempt, rng, anchor);
+        // Nach dem Verschieben wieder aufs echte Netz ziehen -- sonst
+        // verschiebt man den Punkt nur von einem Waldweg auf den naechsten.
+        current = snap(nudgeWaypoints(current, err.section, attempt, rng, anchor));
         continue;
       }
       const reduced = dropWaypoint(current, err.section);
@@ -254,7 +256,13 @@ function bearingBetween(a, b) {
  */
 export async function generateRoutes(
   request,
-  { router, onProgress = () => {}, signal, requestGapMs = REQUEST_GAP_MS } = {},
+  {
+    router,
+    onProgress = () => {},
+    signal,
+    requestGapMs = REQUEST_GAP_MS,
+    snap = (waypoints) => waypoints,
+  } = {},
 ) {
   const {
     start,
@@ -294,7 +302,18 @@ export async function generateRoutes(
     try {
       const produced =
         mode === 'loop'
-          ? await buildLoop({ start, bearing0, rng, normalized, call, onProgress, v, variants, budget })
+          ? await buildLoop({
+              start,
+              bearing0,
+              rng,
+              normalized,
+              call,
+              onProgress,
+              v,
+              variants,
+              budget,
+              snap,
+            })
           : await buildOneWay({
               start,
               end,
@@ -307,6 +326,7 @@ export async function generateRoutes(
               variants,
               failures,
               budget,
+              snap,
             });
       candidates.push(...produced);
     } catch (err) {
@@ -384,13 +404,24 @@ function bestPerVariant(candidates) {
   return [...byVariant.values()];
 }
 
-async function buildLoop({ start, bearing0, rng, normalized, call, onProgress, v, variants, budget }) {
+async function buildLoop({
+  start,
+  bearing0,
+  rng,
+  normalized,
+  call,
+  onProgress,
+  v,
+  variants,
+  budget,
+  snap,
+}) {
   const { durationMin, curviness } = normalized;
   const twisty = (curviness - 1) / 4;
   const detour = 1.15 + 0.22 * twisty; // Strassen sind laenger als der Idealkreis
   let radius = targetDistanceM(durationMin, curviness) / (2 * Math.PI * detour);
 
-  let waypoints = ringWaypoints(start, radius, curviness, bearing0, rng);
+  let waypoints = snap(ringWaypoints(start, radius, curviness, bearing0, rng));
   let spurFixes = 0;
   const out = [];
 
@@ -409,6 +440,7 @@ async function buildLoop({ start, bearing0, rng, normalized, call, onProgress, v
       call,
       rng,
       budget,
+      snap,
     });
     waypoints = used;
     const candidate = finalize(route, used, normalized, { seedBearing: bearing0 });
@@ -423,7 +455,7 @@ async function buildLoop({ start, bearing0, rng, normalized, call, onProgress, v
     // muss man nicht auf Stichstrassen abklopfen.
     if (!timeOk) {
       radius *= clamp(ratio, 0.6, 1.7) ** 0.9;
-      waypoints = ringWaypoints(start, radius, curviness, bearing0, rng);
+      waypoints = snap(ringWaypoints(start, radius, curviness, bearing0, rng));
       continue;
     }
 
@@ -439,7 +471,7 @@ async function buildLoop({ start, bearing0, rng, normalized, call, onProgress, v
     // Erst versetzen, dann streichen.
     const fixed =
       spurFixes === 0
-        ? rotateWaypoint(waypoints, culprit, start, rng)
+        ? snap(rotateWaypoint(waypoints, culprit, start, rng))
         : dropWaypoint(waypoints, culprit + 1);
     if (!fixed) break;
     waypoints = fixed;
@@ -460,6 +492,7 @@ async function buildOneWay({
   variants,
   failures,
   budget,
+  snap,
 }) {
   const { durationMin, curviness } = normalized;
   const twisty = (curviness - 1) / 4;
@@ -494,12 +527,13 @@ async function buildOneWay({
         message: `Variante ${v + 1}/${variants} – Umweg justieren`,
       });
       const { route, waypoints: used } = await routeWithRepair({
-        waypoints: detourWaypoints(start, end, amplitude, curviness, rng),
+        waypoints: snap(detourWaypoints(start, end, amplitude, curviness, rng)),
         assemble: (wps) => [start, ...wps, end],
         anchor: start,
         call,
         rng,
         budget,
+        snap,
       });
       const candidate = finalize(route, used, normalized, { seedBearing: bearing0 });
       out.push(candidate);
@@ -525,12 +559,13 @@ async function buildOneWay({
     });
     const target = destination(start, bearing0, Math.max(2000, reach));
     const { route, waypoints: used } = await routeWithRepair({
-      waypoints: detourWaypoints(start, target, reach * 0.22 * (1 + twisty), curviness, rng),
+      waypoints: snap(detourWaypoints(start, target, reach * 0.22 * (1 + twisty), curviness, rng)),
       assemble: (wps) => [start, ...wps, target],
       anchor: start,
       call,
       rng,
       budget,
+      snap,
     });
     const candidate = finalize(route, [...used, target], normalized, {
       seedBearing: bearing0,

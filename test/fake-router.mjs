@@ -17,12 +17,25 @@ export class FakeRouter {
    * @param {Array<{center: [number, number], radiusM: number}>} deadEnds
    *        Sackgassentaeler: erreichbar, aber nur auf demselben Weg wieder
    *        heraus. Genau daraus entstehen die Stichstrassen.
+   * @param {Array<[number, number]>} corridors
+   *        Dicht abgetastete Punkte entlang der vorhandenen Strassen. Sind
+   *        sie gesetzt, ist alles weiter als corridorWidthM davon entfernt
+   *        unerreichbar -- so verhaelt sich ein Alpental wirklich.
    */
-  constructor({ wiggle = 0.5, stepM = 120, islands = [], deadEnds = [] } = {}) {
+  constructor({
+    wiggle = 0.5,
+    stepM = 120,
+    islands = [],
+    deadEnds = [],
+    corridors = [],
+    corridorWidthM = 700,
+  } = {}) {
     this.wiggle = wiggle;
     this.stepM = stepM;
     this.islands = islands;
     this.deadEnds = deadEnds;
+    this.corridors = corridors;
+    this.corridorWidthM = corridorWidthM;
     this.calls = 0;
     this.rejections = 0;
     this.provider = 'fake';
@@ -31,7 +44,12 @@ export class FakeRouter {
   async route(points) {
     this.calls++;
     for (let i = 0; i < points.length; i++) {
-      const island = this.islands.find((is) => distance(points[i], is.center) < is.radiusM);
+      const abseits =
+        this.corridors.length > 0 &&
+        !this.corridors.some((c) => distance(points[i], c) < this.corridorWidthM);
+      const island = abseits
+        ? { center: points[i] }
+        : this.islands.find((is) => distance(points[i], is.center) < is.radiusM);
       if (island) {
         this.rejections++;
         // Denselben Weg nehmen wie der echte Adapter: Servertext -> Klartext.

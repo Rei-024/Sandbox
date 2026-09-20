@@ -6,8 +6,9 @@
  * routers.js -- hier passiert nur Bedienung.
  */
 
-import { cumulativeDistance, overlapPercent } from './geo.js';
-import { generateRoutes } from './generator.js';
+import { clamp, cumulativeDistance, overlapPercent } from './geo.js';
+import { generateRoutes, targetDistanceM } from './generator.js';
+import { fetchRoadNetwork, networkCacheKey, snapWaypoints } from './roads.js';
 import { BROUTER_PROFILES, createRouter, geocode, reverseGeocode } from './routers.js';
 import { MapView } from './mapview.js';
 import { ElevationChart } from './elevation.js';
@@ -43,6 +44,7 @@ const state = {
 
 let map;
 let chart;
+const roadCache = new Map();
 
 /* ------------------------------------------------------------------ Start */
 
@@ -103,6 +105,10 @@ function wireEvents() {
   });
   $('avoid-unpaved').addEventListener('change', (e) => {
     state.settings.avoidUnpaved = e.target.checked;
+    persist();
+  });
+  $('snap-roads').addEventListener('change', (e) => {
+    state.settings.snapToRoads = e.target.checked;
     persist();
   });
   $('provider').addEventListener('change', (e) => {
@@ -174,6 +180,7 @@ function restoreForm() {
   $('variant-count').value = String(s.variants);
   $('avoid-motorway').checked = s.avoidMotorway;
   $('avoid-unpaved').checked = s.avoidUnpaved;
+  $('snap-roads').checked = s.snapToRoads;
   $('provider').value = s.provider;
   $('brouter-profile').value = s.brouterProfile;
   $('brouter-url').value = s.brouterUrl;
@@ -395,10 +402,26 @@ async function run() {
     seed: state.seed,
   };
 
+  const netzWarnungen = [];
+  let snap = (waypoints) => waypoints;
+  if (state.settings.snapToRoads) {
+    try {
+      const roads = await loadRoadNetwork(request, signal);
+      snap = (waypoints) => snapWaypoints(waypoints, roads, { curviness: request.curviness });
+    } catch (err) {
+      if (err.name === 'AbortError') return;
+      netzWarnungen.push(
+        `Das Straßennetz ließ sich nicht laden (${err.message}) – die Wegpunkte werden blind gesetzt. ` +
+          'Im Gebirge kommen dann eher Sackgassen heraus.',
+      );
+    }
+  }
+
   try {
     const { candidates, best, warnings } = await generateRoutes(request, {
       router: createRouter(state.settings),
       signal,
+      snap,
       onProgress: ({ message }) => setStatus(`${message} …`),
     });
     state.candidates = candidates;
@@ -412,7 +435,8 @@ async function run() {
         ? `${candidates.length} von ${gewuenscht} Varianten sind durchgekommen – die beste steht unten.`
         : `${candidates.length} Variante${candidates.length === 1 ? '' : 'n'} durchgerechnet – die beste steht unten.`,
     );
-    if (warnings.length) showAlert(warnings.join(' '), 'warn');
+    const alle = [...netzWarnungen, ...warnings];
+    if (alle.length) showAlert(alle.join(' '), 'warn');
     nameRoute(best);
   } catch (err) {
     if (err.name === 'AbortError') return;
@@ -421,6 +445,23 @@ async function run() {
   } finally {
     setBusy(false);
   }
+}
+
+/**
+ * Strassennetz der Gegend holen -- einmal je Suche, danach aus dem Speicher.
+ * Der Suchradius richtet sich nach der geplanten Rundengroesse: alles enger
+ * waere nutzlos, alles weiter nur Ballast.
+ */
+async function loadRoadNetwork(request, signal) {
+  const ring = targetDistanceM(request.durationMin, request.curviness) / (2 * Math.PI * 1.25);
+  const radius = clamp(ring * 1.7, 6000, 45000);
+  const key = networkCacheKey(request.start, radius);
+
+  if (roadCache.has(key)) return roadCache.get(key);
+  setStatus('Straßennetz der Gegend laden …');
+  const roads = await fetchRoadNetwork(request.start, radius, { signal });
+  roadCache.set(key, roads);
+  return roads;
 }
 
 function surprise() {

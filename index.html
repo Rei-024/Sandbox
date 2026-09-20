@@ -123,6 +123,15 @@
               <input type="checkbox" id="avoid-unpaved" checked />
               <span>Schotter und Feldwege meiden</span>
             </label>
+            <label class="check">
+              <input type="checkbox" id="snap-roads" checked />
+              <span>Wegpunkte auf echte Straßen setzen</span>
+            </label>
+            <p class="hint">
+              Fragt einmal je Suche das Straßennetz der Gegend ab (OpenStreetMap/Overpass).
+              Ohne das werden die Wegpunkte blind auf einen Kreis gesetzt – im Gebirge landen
+              sie dann auf Waldwegen und in Sackgassen.
+            </p>
 
             <label class="label" for="variant-count">Wie viele Varianten vergleichen?</label>
             <select id="variant-count">

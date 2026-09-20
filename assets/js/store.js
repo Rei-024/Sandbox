@@ -18,6 +18,7 @@ export const DEFAULTS = {
   variants: 3,
   avoidMotorway: true,
   avoidUnpaved: true,
+  snapToRoads: true,
   provider: 'brouter',
   brouterProfile: 'auto',
   brouterUrl: '',
