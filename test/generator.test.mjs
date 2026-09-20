@@ -8,6 +8,7 @@ import {
   nudgeWaypoints,
   rotateWaypoint,
   spurCulprit,
+  thinWaypoints,
   targetDistanceM,
 } from '../assets/js/generator.js';
 import { bearing, destination, distance, overlapDetail } from '../assets/js/geo.js';
@@ -455,4 +456,66 @@ test('Stichstrassen werden auch repariert, wenn die Wunschzeit unerreichbar ist'
     meldungen.some((m) => /Stichstrasse/.test(m)),
     `Reparatur lief nicht an: ${[...new Set(meldungen)].join(' | ')}`,
   );
+});
+
+
+/* ------------------------------------------ Punktgrenze des Tarifs */
+
+test('thinWaypoints dampft gleichmaessig ein', () => {
+  const wps = [0, 1, 2, 3, 4, 5, 6, 7].map((i) => destination(START, i * 45, 12000));
+  const drei = thinWaypoints(wps, 3);
+  assert.equal(drei.length, 3);
+  assert.deepEqual(drei[0], wps[0]);
+  assert.deepEqual(thinWaypoints(wps, 20), wps, 'unter der Grenze bleibt alles');
+  assert.deepEqual(thinWaypoints(wps, 0), []);
+});
+
+test('Bekannte Punktgrenze wird von Anfang an eingehalten', async () => {
+  const router = new FakeRouter({ wiggle: 0.4, maxPoints: 5 });
+  const { best } = await generateRoutes(
+    { start: START, mode: 'loop', durationMin: 120, curviness: 5, variants: 1, seed: 3 },
+    { router, ...fast },
+  );
+  assert.equal(router.zuVielePunkte, 0, 'gar nicht erst anecken');
+  // Start + Wegpunkte + Start dürfen zusammen fünf nicht überschreiten.
+  assert.ok(best.waypoints.length <= 3, `${best.waypoints.length} Wegpunkte`);
+});
+
+test('Verschwiegene Punktgrenze wird aus der Fehlermeldung gelernt', async () => {
+  // Der Dienst behauptet 30, erlaubt aber nur 5 -- genau wie der freie
+  // GraphHopper-Tarif, der das erst in der Antwort verraet.
+  const router = new FakeRouter({ wiggle: 0.4, maxPoints: 30, echterGrenzwert: 5 });
+  const { best } = await generateRoutes(
+    { start: START, mode: 'loop', durationMin: 120, curviness: 5, variants: 1, seed: 3 },
+    { router, ...fast },
+  );
+  assert.ok(router.zuVielePunkte > 0, 'der Testfall muss wirklich anecken');
+  assert.ok(best, 'trotzdem kommt eine Route heraus');
+  assert.ok(best.waypoints.length <= 3, `${best.waypoints.length} Wegpunkte`);
+});
+
+test('Auch Einwegstrecken halten die Punktgrenze ein', async () => {
+  const router = new FakeRouter({ wiggle: 0.4, maxPoints: 5 });
+  await generateRoutes(
+    { start: START, mode: 'oneway', durationMin: 90, curviness: 5, bearing: 0, variants: 1, seed: 4 },
+    { router, ...fast },
+  );
+  assert.equal(router.zuVielePunkte, 0);
+});
+
+test('Beim Totalausfall stehen alle Gruende in der Meldung', async () => {
+  // Rundkurs-Suche abgelehnt UND danach nichts erreichbar: der Nutzer muss
+  // beides sehen, sonst raet er am falschen Ende.
+  const router = new FakeRouter({
+    supportsRoundTrip: true,
+    roundTripFails: true,
+    islands: [{ center: START, radiusM: 400000 }],
+  });
+  const err = await generateRoutes(
+    { start: START, mode: 'loop', durationMin: 120, curviness: 3, variants: 1, seed: 2 },
+    { router, ...fast },
+  ).catch((e) => e);
+
+  assert.match(err.message, /Rundkurs-Suche/, `Grund fehlt: ${err.message}`);
+  assert.match(err.message, /Straßennetz|Verbindung|Stück/, err.message);
 });

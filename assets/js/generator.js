@@ -99,9 +99,10 @@ export function targetDistanceM(durationMin, curviness) {
  * damit die Route sich durchs Gelaende schlaengelt statt brav im Kreis zu
  * fahren.
  */
-function ringWaypoints(start, radiusM, curviness, bearing0, rng) {
+function ringWaypoints(start, radiusM, curviness, bearing0, rng, maxCount = 99) {
   const twisty = (curviness - 1) / 4;
-  const count = 4 + Math.round(curviness); // 5 .. 9
+  // 5 bis 9 -- aber nie mehr, als der Tarif des Dienstes je Anfrage zulaesst.
+  const count = Math.max(2, Math.min(4 + Math.round(curviness), maxCount));
   const angleJitter = (360 / count) * (0.15 + 0.25 * twisty);
   const radialJitter = 0.12 + 0.3 * twisty;
   const points = [];
@@ -115,8 +116,8 @@ function ringWaypoints(start, radiusM, curviness, bearing0, rng) {
 }
 
 /** Zwischenpunkte fuer eine Einwegstrecke: abwechselnd links/rechts der Luftlinie. */
-function detourWaypoints(start, end, amplitudeM, curviness, rng) {
-  const count = 1 + Math.round(curviness * 0.8); // 2 .. 5
+function detourWaypoints(start, end, amplitudeM, curviness, rng, maxCount = 99) {
+  const count = Math.max(1, Math.min(1 + Math.round(curviness * 0.8), maxCount)); // 2 .. 5
   const direct = distance(start, end);
   const points = [];
   for (let i = 1; i <= count; i++) {
@@ -194,6 +195,19 @@ export function rotateWaypoint(waypoints, index, start, rng) {
   return waypoints.map((p, i) => (i === index ? moved : p));
 }
 
+/**
+ * Gleichmaessig auf eine Hoechstzahl eindampfen. Noetig, wenn der Dienst erst
+ * in seiner Fehlermeldung verraet, wie viele Punkte sein Tarif zulaesst.
+ */
+export function thinWaypoints(waypoints, limit) {
+  if (waypoints.length <= limit) return waypoints;
+  if (limit < 1) return [];
+  const out = [];
+  const stride = waypoints.length / limit;
+  for (let i = 0; i < limit; i++) out.push(waypoints[Math.floor(i * stride)]);
+  return out;
+}
+
 /** Letzter Ausweg: den verdaechtigen Wegpunkt ganz weglassen. */
 export function dropWaypoint(waypoints, section) {
   if (waypoints.length <= 1) return null;
@@ -212,11 +226,22 @@ export function dropWaypoint(waypoints, section) {
 async function routeWithRepair({ waypoints, assemble, anchor, call, rng, budget, snap }) {
   let current = waypoints.slice();
   let attempt = 0;
+  let thinned = 0;
 
   for (;;) {
     try {
       return { route: await call(assemble(current)), waypoints: current };
     } catch (err) {
+      // Der Dienst verraet seine Tarifgrenze erst beim Anecken. Dann eben
+      // mit weniger Wegpunkten -- das kostet keine Reparatur aus dem Budget.
+      if (err.kind === 'too-many-points' && thinned < 2) {
+        const limit = Math.max(1, (err.maxPoints ?? 5) - 2);
+        if (current.length > limit) {
+          current = thinWaypoints(current, limit);
+          thinned++;
+          continue;
+        }
+      }
       const fixable = err.name !== 'AbortError' && err.kind === 'unreachable';
       if (!fixable || budget.left <= 0 || attempt >= MAX_REPAIRS_PER_CALL) throw err;
       budget.left--;
@@ -297,6 +322,8 @@ export async function generateRoutes(
   // Manche Dienste koennen Rundkurse selbst suchen (GraphHopper). Das umgeht
   // unsere gewuerfelten Wegpunkte komplett -- und damit die Sackgassen, an
   // denen sie im Gebirge scheitern.
+  // Start und Ziel zaehlen mit, deshalb minus zwei.
+  const maxWaypoints = Math.max(1, (router.capabilities?.maxPoints ?? 30) - 2);
   const kannRundkurs = mode === 'loop' && router.capabilities?.roundTrip && router.roundTrip;
   const callRoundTrip = async (distanceM, tripSeed) => {
     if (signal?.aborted) throw new DOMException('Abgebrochen', 'AbortError');
@@ -333,6 +360,7 @@ export async function generateRoutes(
           variants,
           budget,
           snap,
+          maxWaypoints,
         });
 
       const produced =
@@ -369,6 +397,7 @@ export async function generateRoutes(
               failures,
               budget,
               snap,
+              maxWaypoints,
             });
       candidates.push(...produced);
     } catch (err) {
@@ -381,7 +410,7 @@ export async function generateRoutes(
   }
 
   if (!candidates.length) {
-    throw explain(lastError);
+    throw explain(lastError, failures);
   }
 
   // Beim Nachjustieren entstehen je Variante mehrere Routen. Alle zu zeigen
@@ -424,15 +453,25 @@ function summarize(failures) {
  * Servertext hinzuwerfen. Ein neuer Anlauf wuerfelt andere Wegpunkte und hilft
  * bei einem Inselproblem meistens schon.
  */
-function explain(lastError) {
+function explain(lastError, failures = []) {
   if (!lastError) return new Error('Es ließ sich keine Route erzeugen.');
+
+  // Alles, was unterwegs schiefging -- sonst sieht man nur den letzten Fehler
+  // und nicht, woran es eigentlich lag (etwa dass der Rundkurs-Algorithmus
+  // abgelehnt wurde und deshalb der Notweg lief).
+  const gruende = [...new Set(failures.map((f) => f.message))].filter(
+    (m) => m !== lastError.message,
+  );
+  const anhang = gruende.length ? ` Vorher außerdem: ${gruende.join(' ')}` : '';
+
   if (lastError.kind === 'unreachable') {
     return new Error(
       `${lastError.message} Tipp nochmal auf »Strecke generieren« – dann werden andere ` +
-        'Wegpunkte gewürfelt. Hilft das nicht, verschieb die Start-Nadel auf eine größere Straße.',
+        'Wegpunkte gewürfelt. Hilft das nicht, verschieb die Start-Nadel auf eine größere Straße.' +
+        anhang,
     );
   }
-  return lastError;
+  return new Error(lastError.message + anhang);
 }
 
 /** Aus allen Versuchen je Startwinkel den besten herausziehen. */
@@ -457,13 +496,14 @@ async function buildLoop({
   variants,
   budget,
   snap,
+  maxWaypoints = 99,
 }) {
   const { durationMin, curviness } = normalized;
   const twisty = (curviness - 1) / 4;
   const detour = 1.15 + 0.22 * twisty; // Strassen sind laenger als der Idealkreis
   let radius = targetDistanceM(durationMin, curviness) / (2 * Math.PI * detour);
 
-  let waypoints = snap(ringWaypoints(start, radius, curviness, bearing0, rng));
+  let waypoints = snap(ringWaypoints(start, radius, curviness, bearing0, rng, maxWaypoints));
   let spurFixes = 0;
   let letzteLaenge = null;
   const out = [];
@@ -542,7 +582,7 @@ async function buildLoop({
         }
       }
       radius *= clamp(ratio, 0.6, 1.7) ** 0.9;
-      waypoints = snap(ringWaypoints(start, radius, curviness, bearing0, rng));
+      waypoints = snap(ringWaypoints(start, radius, curviness, bearing0, rng, maxWaypoints));
       continue;
     }
     break;
@@ -591,6 +631,7 @@ async function buildOneWay({
   failures,
   budget,
   snap,
+  maxWaypoints = 99,
 }) {
   const { durationMin, curviness } = normalized;
   const twisty = (curviness - 1) / 4;
@@ -625,7 +666,7 @@ async function buildOneWay({
         message: `Variante ${v + 1}/${variants} – Umweg justieren`,
       });
       const { route, waypoints: used } = await routeWithRepair({
-        waypoints: snap(detourWaypoints(start, end, amplitude, curviness, rng)),
+        waypoints: snap(detourWaypoints(start, end, amplitude, curviness, rng, maxWaypoints)),
         assemble: (wps) => [start, ...wps, end],
         anchor: start,
         call,
@@ -657,7 +698,7 @@ async function buildOneWay({
     });
     const target = destination(start, bearing0, Math.max(2000, reach));
     const { route, waypoints: used } = await routeWithRepair({
-      waypoints: snap(detourWaypoints(start, target, reach * 0.22 * (1 + twisty), curviness, rng)),
+      waypoints: snap(detourWaypoints(start, target, reach * 0.22 * (1 + twisty), curviness, rng, maxWaypoints)),
       assemble: (wps) => [start, ...wps, target],
       anchor: start,
       call,

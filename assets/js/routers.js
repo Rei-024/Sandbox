@@ -23,7 +23,10 @@ export class RoutingError extends Error {
    * @param {'unreachable'|'no-data'|'busy'|'profile'|'other'} [opts.kind]
    * @param {number|null} [opts.section]  betroffener Streckenabschnitt, falls bekannt
    */
-  constructor(message, { provider, status, retryable = false, kind = 'other', section = null } = {}) {
+  constructor(
+    message,
+    { provider, status, retryable = false, kind = 'other', section = null, maxPoints = null } = {},
+  ) {
     super(message);
     this.name = 'RoutingError';
     this.provider = provider;
@@ -31,6 +34,7 @@ export class RoutingError extends Error {
     this.retryable = retryable;
     this.kind = kind;
     this.section = section;
+    this.maxPoints = maxPoints;
   }
 }
 
@@ -128,6 +132,7 @@ export class BRouterAdapter {
       avoidToll: 'waypoints-only',
       roundTrip: false,
       needsKey: false,
+      maxPoints: 30,
     };
   }
 
@@ -219,9 +224,12 @@ export class BRouterAdapter {
 /* ------------------------------------------------------------- GraphHopper */
 
 export class GraphHopperAdapter {
-  constructor({ apiKey, baseUrl = 'https://graphhopper.com/api/1/route' } = {}) {
+  constructor({ apiKey, baseUrl = 'https://graphhopper.com/api/1/route', maxPoints = 5 } = {}) {
     this.apiKey = (apiKey ?? '').trim();
     this.baseUrl = baseUrl;
+    // Der kostenlose Tarif erlaubt fuenf Punkte je Anfrage. Sagt der Server
+    // etwas anderes, merken wir uns das (siehe #post).
+    this.maxPoints = maxPoints;
     this.provider = 'graphhopper';
   }
 
@@ -235,6 +243,7 @@ export class GraphHopperAdapter {
       avoidToll: 'exact',
       roundTrip: true,
       needsKey: true,
+      maxPoints: this.maxPoints,
     };
   }
 
@@ -313,6 +322,23 @@ export class GraphHopperAdapter {
     const json = await res.json().catch(() => null);
     if (!res.ok) {
       const msg = json?.message ?? `HTTP ${res.status}`;
+
+      // "Too many points for Routing API: 10, allowed: 5" -- der Server nennt
+      // die Tarifgrenze. Die merken wir uns, statt sie zu erraten.
+      const grenze = msg.match(/too many points.*allowed:\s*(\d+)/i);
+      if (grenze) {
+        this.maxPoints = Number(grenze[1]);
+        throw new RoutingError(
+          `Dein GraphHopper-Tarif erlaubt nur ${this.maxPoints} Punkte je Anfrage.`,
+          {
+            provider: 'graphhopper',
+            status: res.status,
+            kind: 'too-many-points',
+            maxPoints: this.maxPoints,
+          },
+        );
+      }
+
       // GraphHopper benennt den unerreichbaren Punkt im hints-Block.
       const pointIndex = json?.hints?.find((h) => h.point_index != null)?.point_index;
       const unreachable = /connection between locations not found|cannot find point/i.test(msg);

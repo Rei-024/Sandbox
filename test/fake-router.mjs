@@ -31,6 +31,8 @@ export class FakeRouter {
     corridorWidthM = 700,
     supportsRoundTrip = false,
     roundTripFails = false,
+    maxPoints = 30,
+    echterGrenzwert = null,
   } = {}) {
     this.wiggle = wiggle;
     this.stepM = stepM;
@@ -41,13 +43,17 @@ export class FakeRouter {
     this.supportsRoundTrip = supportsRoundTrip;
     this.roundTripFails = roundTripFails;
     this.roundTrips = 0;
+    this.maxPoints = maxPoints;
+    // Verschweigt der Dienst seine Grenze und meckert erst beim Anecken?
+    this.echterGrenzwert = echterGrenzwert;
+    this.zuVielePunkte = 0;
     this.calls = 0;
     this.rejections = 0;
     this.provider = 'fake';
   }
 
   get capabilities() {
-    return { roundTrip: this.supportsRoundTrip };
+    return { roundTrip: this.supportsRoundTrip, maxPoints: this.maxPoints };
   }
 
   /** Kreis durch den Start mit ungefaehr der gewuenschten Laenge. */
@@ -76,6 +82,14 @@ export class FakeRouter {
 
   async route(points) {
     this.calls++;
+    const grenze = this.echterGrenzwert ?? this.maxPoints;
+    if (points.length > grenze) {
+      this.zuVielePunkte++;
+      throw new RoutingError(
+        `Dein Tarif erlaubt nur ${grenze} Punkte je Anfrage.`,
+        { provider: 'fake', kind: 'too-many-points', maxPoints: grenze },
+      );
+    }
     for (let i = 0; i < points.length; i++) {
       const abseits =
         this.corridors.length > 0 &&
