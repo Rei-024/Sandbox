@@ -109,18 +109,35 @@ Rundkurs-Suche mit – die arbeitet direkt auf dem Straßengraphen, statt Wegpun
 zu würfeln, und umgeht damit Sackgassen und Stichstraßen von vornherein. Im
 Gebirge ist das der spürbar bessere Weg.
 
-### Ast oder Schleife?
+### Ast, Schleife oder Serpentine?
 
-Beim Schneiden kommt es darauf an, eine Sackgasse von einer kleinen Schleife
-zu unterscheiden – rein und auf anderem Weg heraus ist kein Doppeltfahren und
-soll bleiben. Dafür wird die erste Hälfte des Teilwegs gegen die zweite
-gehalten (`retraceRatio`): bei einem Ast deckt sich alles (1,0), bei einer
-Schleife nichts (0,0). Zwei weitere Grenzen schützen davor, zu viel
-wegzunehmen: ein einzelner Schnitt darf höchstens 60 % der Route treffen, alle
-zusammen höchstens 50 % – beides gegen die *ursprüngliche* Länge gerechnet.
+Beim Schneiden kommt es darauf an, drei Dinge auseinanderzuhalten:
+
+- **Sackgasse** – rein und auf demselben Weg heraus. Soll weg.
+- **Kleine Schleife** – rein und auf anderem Weg heraus. Kein Doppeltfahren,
+  soll bleiben. Erkennbar daran, dass sich Hin- und Rückweg nicht decken
+  (`retraceRatio`: Ast 1,0, Schleife 0,0).
+- **Serpentine** – zwei Kehrenschenkel liegen waagerecht nur 30 bis 40 Meter
+  auseinander und sehen damit aus wie hin und zurück. Sie liegen aber
+  **übereinander**: ein Höhenunterschied an der Schließstelle verrät die
+  Bergstraße. Ohne diese Prüfung schnitt die App ausgerechnet das weg, wofür
+  man überhaupt losfährt.
+
+Zwei Grenzen schützen davor, zu viel wegzunehmen: ein einzelner Schnitt darf
+höchstens 60 % der Route treffen, alle zusammen höchstens 50 % – beides gegen
+die *ursprüngliche* Länge gerechnet.
 
 Simulation mit vier Sackgassentälern rund um den Start, 15 Durchläufe:
 Doppeltfahren im Median 0 %, im Maximum 2 % (vorher bis 83 %).
+
+### Drei Vorschläge, nicht dreimal derselbe
+
+Die Varianten starten in gleichmäßig über den Kreis verteilte Richtungen –
+auch wenn die Richtung egal ist. Würfelte jede für sich, kamen regelmäßig drei
+fast gleiche Runden heraus. Danach wird die Auswahl nach Verschiedenheit
+sortiert: die beste zuerst, dann jeweils die nächste, die sich deutlich
+unterscheidet. Gibt die Gegend nichts Verschiedenes her, sagt die App das,
+statt drei Zwillinge als Auswahl auszugeben.
 
 ### Maut umfahren ohne zweiten Dienst
 
@@ -176,9 +193,11 @@ Ehrlichkeitshalber:
 - **Sie kennt keine Straßenqualität.** Ob der Belag taugt oder die Straße
   gesperrt ist, weiß nur OpenStreetMap – und das nicht immer.
 - **Der Maut-Hinweis ist ein Hinweis.** Von jeder Straße ist nur ein
-  Mittelpunkt bekannt, nicht ihr Verlauf. Mit BRouter kann die App Maut nur von
-  den Wegpunkten fernhalten, nicht von der Strecke dazwischen – deshalb warnt
-  sie mit „möglicherweise", statt Sicherheit vorzutäuschen.
+  Mittelpunkt bekannt, nicht ihr Verlauf – deshalb heißt es „möglicherweise",
+  statt Sicherheit vorzutäuschen. Gewarnt wird nur, wenn die *fertige* Route
+  an einer bekannten Mautstraße entlangführt: dass unterwegs eine Sperrzone
+  fallen musste, liegt meist an einem unerreichbaren Wegpunkt und hat mit Maut
+  nichts zu tun.
 - **Öffentliche Server, fair genutzt.** Zwischen den Anfragen liegt eine Pause,
   die Ortssuche hält das Limit von Nominatim ein (eine Anfrage je Sekunde), das
   Straßennetz wird einmal je Suche geholt und zwischengespeichert. Wer die App
@@ -200,7 +219,7 @@ außen gehen nur die Anfragen an den gewählten Routing-Dienst, an Nominatim
 ## Tests
 
 ```bash
-npm test                                            # 92 Unit-Tests, ohne Netz
+npm test                                            # 102 Unit-Tests, ohne Netz
 NODE_PATH=$(npm root -g) node test/browser/smoke.mjs # kompletter Ablauf im Browser
 ```
 

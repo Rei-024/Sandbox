@@ -12,8 +12,9 @@ import {
   lineLength,
   overlapPercent,
   overlapRatio,
-  retraceRatio,
   resample,
+  retraceRatio,
+  similarity,
   sampleAlong,
   simplify,
 } from '../assets/js/geo.js';
@@ -248,4 +249,97 @@ test('Auch kurze Aeste werden erkannt', () => {
   // overlapRatio unterschaetzt die: seine Mindestdistanz zwischen zwei
   // Besuchen greift auf kurzen Teilwegen nicht. Deshalb retraceRatio.
   assert.equal(exciseSpurs(routeMitAst({ astKm: 0.5 })).cuts, 1);
+});
+
+test('Ein Ast wird auch erkannt, wenn der Rueckweg versetzt verlaeuft', () => {
+  // Gegenspur oder Parallelstueck: der Rueckweg deckt sich nicht exakt.
+  const haupt = [];
+  for (let i = 0; i <= 400; i++) haupt.push(destination(FREUDENSTADT, 90, i * 25));
+  const hin = [];
+  let p = haupt[200];
+  for (let i = 1; i <= 120; i++) {
+    p = destination(p, 0, 25);
+    hin.push(p);
+  }
+  const mitVersatz = (v) => [
+    ...haupt.slice(0, 201),
+    ...hin,
+    ...hin.slice(0, -1).reverse().map((q) => destination(q, 90, v)),
+    ...haupt.slice(201),
+  ];
+
+  assert.equal(exciseSpurs(mitVersatz(40)).cuts, 1, '40 m Versatz ist noch derselbe Weg');
+  assert.equal(exciseSpurs(mitVersatz(0)).cuts, 1);
+});
+
+test('Zwei getrennte Strassen nebeneinander gelten nicht als Ast', () => {
+  // Hin auf der einen, zurueck auf der anderen -- das ist kein Doppeltfahren
+  // und darf nicht weggeschnitten werden.
+  const hin = [];
+  const zurueck = [];
+  for (let i = 0; i <= 200; i++) hin.push(destination(FREUDENSTADT, 90, i * 25));
+  for (let i = 200; i >= 0; i--) {
+    zurueck.push(destination(destination(FREUDENSTADT, 90, i * 25), 0, 90));
+  }
+  assert.equal(exciseSpurs([...hin, ...zurueck]).cuts, 0);
+});
+
+test('similarity erkennt gleiche und verschiedene Routen', () => {
+  const a = [];
+  for (let i = 0; i <= 120; i++) a.push(destination(FREUDENSTADT, i * 3, 8000));
+  const b = a.map((p) => destination(p, 0, 30)); // dieselbe Runde, leicht versetzt
+  const c = [];
+  for (let i = 0; i <= 120; i++) c.push(destination(destination(FREUDENSTADT, 90, 40000), i * 3, 8000));
+
+  assert.ok(similarity(a, a) > 0.99, 'mit sich selbst identisch');
+  assert.ok(similarity(a, b) > 0.9, 'dieselbe Strecke, andere Stützpunkte');
+  assert.ok(similarity(a, c) < 0.05, 'andere Gegend');
+});
+
+test('Serpentinen werden nicht als Sackgasse missverstanden', () => {
+  // Zwei Kehrenschenkel liegen waagerecht dicht beieinander und sehen wie
+  // hin-und-zurueck aus. Sie liegen aber uebereinander -- ohne die
+  // Hoehenpruefung wurde ausgerechnet die Bergstrasse zerschnitten.
+  const serpentinen = (abstandM, kehren = 8, schenkelM = 250, steigung = 0.1) => {
+    const pts = [];
+    let basis = FREUDENSTADT;
+    let gefahren = 0;
+    for (let k = 0; k < kehren; k++) {
+      const richtung = k % 2 ? 270 : 90;
+      for (let i = 0; i <= schenkelM / 25; i++) {
+        const p = destination(basis, richtung, i * 25);
+        pts.push([p[0], p[1], 600 + (gefahren + i * 25) * steigung]);
+      }
+      gefahren += schenkelM + abstandM;
+      basis = destination(destination(basis, richtung, schenkelM), 0, abstandM);
+    }
+    return pts;
+  };
+
+  for (const abstand of [20, 30, 40, 60]) {
+    assert.equal(
+      exciseSpurs(serpentinen(abstand)).cuts,
+      0,
+      `Serpentine mit ${abstand} m Schenkelabstand wurde zerschnitten`,
+    );
+  }
+});
+
+test('Eine Sackgasse am Berg wird trotz Hoehenunterschied erkannt', () => {
+  // Hinein geht es bergauf, heraus bergab -- an der Kreuzung ist die Hoehe
+  // wieder dieselbe. Genau daran haengt die Unterscheidung.
+  const haupt = [];
+  for (let i = 0; i <= 400; i++) {
+    const p = destination(FREUDENSTADT, 90, i * 25);
+    haupt.push([p[0], p[1], 600 + Math.sin(i / 40) * 8]);
+  }
+  const hin = [];
+  let q = haupt[200];
+  for (let i = 1; i <= 120; i++) {
+    const p = destination([q[0], q[1]], 0, 25);
+    q = [p[0], p[1], 600 + i * 1.5];
+    hin.push(q);
+  }
+  const route = [...haupt.slice(0, 201), ...hin, ...hin.slice(0, -1).reverse(), ...haupt.slice(201)];
+  assert.equal(exciseSpurs(route).cuts, 1);
 });

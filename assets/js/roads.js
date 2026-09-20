@@ -26,6 +26,15 @@ export const OVERPASS_ENDPOINTS = [
 /** Strassenklassen, die fuers Motorrad taugen -- absteigend nach Groesse. */
 export const ROAD_CLASSES = ['primary', 'secondary', 'tertiary', 'unclassified', 'residential'];
 
+/**
+ * Wie nah an einem bekannten Mautstrassen-Mittelpunkt gilt als "darauf".
+ *
+ * Derselbe Wert fuer Sperrkreis und Warnung: waere die Warnschwelle weiter
+ * als der Sperrkreis, koennte die Route legal in dem Band dazwischen liegen
+ * und genau den Fehlalarm ausloesen, den die Sperre verhindern soll.
+ */
+export const TOLL_RADIUS_M = 150;
+
 const CLASS_RANK = Object.fromEntries(ROAD_CLASSES.map((c, i) => [c, i]));
 
 /**
@@ -159,7 +168,7 @@ export async function fetchRoadNetwork(
  * Die Route wird vorher auf feste Schrittweite gebracht: jeden n-ten Punkt zu
  * pruefen wuerde je nach Knotendichte ueber eine Mautstrasse hinwegspringen.
  */
-export function tollRoadsNear(coords, roads, { thresholdM = 250, sampleM = 100 } = {}) {
+export function tollRoadsNear(coords, roads, { thresholdM = TOLL_RADIUS_M, sampleM = 100 } = {}) {
   const maut = roads.filter((r) => r.toll);
   if (!maut.length) return [];
   const treffer = new Set();
@@ -181,13 +190,25 @@ export function tollRoadsNear(coords, roads, { thresholdM = 250, sampleM = 100 }
  * Routing-Dienst -- es kostet keine einzige zusaetzliche Anfrage.
  *
  * Der Radius bleibt klein: gesperrt wird ein Stueck der Strasse, nicht die
- * halbe Landschaft. Und die Zahl ist gedeckelt, damit die URL nicht platzt
- * und nicht versehentlich ein ganzes Tal zugemauert wird.
+ * halbe Landschaft. Ein Sperrkreis trifft naemlich alles in seinem Umkreis,
+ * auch kreuzende Strassen ohne Maut -- ist er zu gross, kappt er im Tal die
+ * einzige Durchfahrt und die ganze Sperre muss wieder fallen.
+ *
+ * Sperrkreise unmittelbar am Start entfallen: die eigene Zufahrt zuzumauern
+ * macht die Suche unmoeglich, statt Maut zu vermeiden.
  */
-export function tollNogos(roads, { radiusM = 250, limit = 25, near = null } = {}) {
+export function tollNogos(
+  roads,
+  { radiusM = TOLL_RADIUS_M, limit = 25, keepClear = [], keepClearM = 1200 } = {},
+) {
+  const punkte = keepClear.filter(Boolean);
   let maut = roads.filter((r) => r.toll);
-  if (near) {
-    maut = maut.sort((a, b) => distance(near, a.point) - distance(near, b.point));
+  if (punkte.length) {
+    // Start UND Ziel freihalten: eine Sperrzone auf der eigenen Zufahrt macht
+    // die Suche unmoeglich, statt Maut zu vermeiden.
+    maut = maut.filter((r) => punkte.every((p) => distance(p, r.point) > keepClearM));
+    const naehe = (r) => Math.min(...punkte.map((p) => distance(p, r.point)));
+    maut = maut.sort((a, b) => naehe(a) - naehe(b));
   }
   return maut.slice(0, limit).map((r) => [r.point[0], r.point[1], radiusM]);
 }

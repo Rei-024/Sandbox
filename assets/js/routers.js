@@ -151,12 +151,17 @@ export class BRouterAdapter {
       if (err.name === 'AbortError') throw err;
 
       // Mit gesperrten Mautstrassen gibt es hier keinen Weg? Dann lieber eine
-      // Route mit Maut als gar keine -- aber der Fahrer erfaehrt es.
+      // Route mit Maut als gar keine.
+      //
+      // Gemeldet wird das NICHT von hier aus: unerreichbare Wegpunkte sind im
+      // Gebirge Alltag und haben meist nichts mit Maut zu tun. Ob die Route
+      // am Ende wirklich ueber eine Mautstrasse fuehrt, weiss erst die
+      // Oberflaeche, wenn sie die fertige Strecke gegen die Mautdaten haelt.
+      // Frueher stand hier eine Warnung, die auch dann erschien, wenn die
+      // Route am Ende gar keine Maut beruehrte.
       if (nogos.length && err.kind === 'unreachable') {
-        this.notices = [
-          'Ohne Mautstraßen war hier keine Route möglich – die Sperre wurde wieder aufgehoben.',
-        ];
-        return this.#request(points, profile, signal, []);
+        const route = await this.#request(points, profile, signal, []);
+        return { ...route, tollBlockLifted: true };
       }
       if (profile !== BROUTER_FALLBACK && err.kind === 'profile') {
         // Unbekanntes Profil auf dem Server? Dann lieber mit dem Standard

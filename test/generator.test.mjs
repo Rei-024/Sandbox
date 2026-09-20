@@ -5,6 +5,7 @@ import {
   generateRoutes,
   measure,
   mulberry32,
+  nachVielfalt,
   nudgeWaypoints,
   rotateWaypoint,
   spurCulprit,
@@ -520,4 +521,40 @@ test('Beim Totalausfall stehen alle Gruende in der Meldung', async () => {
 
   assert.match(err.message, /Rundkurs-Suche/, `Grund fehlt: ${err.message}`);
   assert.match(err.message, /Straßennetz|Verbindung|Stück/, err.message);
+});
+
+/* --------------------------------------------------------- Vielfalt */
+
+test('Varianten starten in verschiedene Richtungen, auch ohne Wunschrichtung', async () => {
+  // Frueher wuerfelte jede Variante ihre Richtung fuer sich -- dabei kamen
+  // regelmaessig drei fast gleiche Runden heraus.
+  const router = new FakeRouter({ wiggle: 0.4 });
+  const { candidates } = await generateRoutes(
+    { start: START, mode: 'loop', durationMin: 120, curviness: 3, variants: 3, seed: 17 },
+    { router, ...fast },
+  );
+  const richtungen = candidates.map((c) => c.seedBearing).sort((a, b) => a - b);
+  for (let i = 1; i < richtungen.length; i++) {
+    const abstand = richtungen[i] - richtungen[i - 1];
+    assert.ok(abstand > 60, `Richtungen liegen zu dicht: ${richtungen.map(Math.round)}`);
+  }
+});
+
+test('nachVielfalt stellt Verschiedenes nach vorn, ohne die Beste zu verdraengen', () => {
+  const runde = (bearing, radius) => {
+    const coords = [];
+    for (let i = 0; i <= 120; i++) {
+      coords.push(destination(destination(START, bearing, radius), i * 3, radius));
+    }
+    return coords;
+  };
+  const beste = { score: 0.1, coords: runde(0, 8000) };
+  const fastGleich = { score: 0.2, coords: runde(0, 8000).map((p) => destination(p, 0, 30)) };
+  const anders = { score: 0.3, coords: runde(180, 8000) };
+
+  const [erste, zweite, dritte] = nachVielfalt([beste, fastGleich, anders]);
+  assert.equal(erste, beste, 'die beste bleibt vorn');
+  assert.equal(zweite, anders, 'dann die verschiedene, obwohl sie schlechter bewertet ist');
+  assert.equal(dritte, fastGleich);
+  assert.ok(dritte.similarToBest > 0.6, 'und ist als ähnlich markiert');
 });

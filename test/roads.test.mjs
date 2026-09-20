@@ -7,6 +7,7 @@ import {
   networkCacheKey,
   parseOverpassRoads,
   snapWaypoints,
+  TOLL_RADIUS_M,
   tollNogos,
   tollRoadsNear,
 } from '../assets/js/roads.js';
@@ -170,13 +171,43 @@ test('tollNogos liefert BRouter-Sperrzonen, die naechsten zuerst', () => {
     { point: destination(START, 0, 5000), toll: true, highway: 'tertiary' },
     { point: destination(START, 0, 8000), toll: false, highway: 'tertiary' },
   ];
-  const zonen = tollNogos(roads, { near: START, radiusM: 250 });
+  const zonen = tollNogos(roads, { keepClear: [START], radiusM: 250 });
   assert.equal(zonen.length, 2, 'nur Mautstraßen');
   assert.equal(zonen[0][2], 250);
   assert.ok(
     distance(START, [zonen[0][0], zonen[0][1]]) < distance(START, [zonen[1][0], zonen[1][1]]),
     'die naheliegenden zuerst',
   );
-  assert.equal(tollNogos(roads, { near: START, limit: 1 }).length, 1, 'Deckel greift');
+  assert.equal(tollNogos(roads, { keepClear: [START], limit: 1 }).length, 1, 'Deckel greift');
   assert.deepEqual(tollNogos([{ point: START, toll: false }]), []);
+});
+
+test('Sperrkreise bleiben klein und lassen den Start frei', () => {
+  const roads = [
+    { point: destination(START, 0, 400), toll: true, highway: 'tertiary', name: 'Zufahrt' },
+    { point: destination(START, 0, 9000), toll: true, highway: 'tertiary', name: 'Passstraße' },
+  ];
+  const zonen = tollNogos(roads, { keepClear: [START] });
+
+  assert.equal(zonen.length, 1, 'die Zufahrt am Start darf nicht zugemauert werden');
+  assert.equal(zonen[0][2], 150, 'kleiner Radius: ein Sperrkreis trifft auch kreuzende Straßen');
+});
+
+test('Auch das Ziel einer Einwegstrecke bleibt von Sperrzonen frei', () => {
+  const ziel = destination(START, 90, 40000);
+  const roads = [
+    { point: destination(ziel, 0, 500), toll: true, highway: 'tertiary', name: 'Zufahrt Ziel' },
+    { point: destination(START, 0, 9000), toll: true, highway: 'tertiary', name: 'Passstraße' },
+  ];
+  const zonen = tollNogos(roads, { keepClear: [START, ziel] });
+  assert.equal(zonen.length, 1, 'die Zufahrt zum Ziel darf nicht zugemauert werden');
+});
+
+test('Warnschwelle und Sperrradius sind derselbe Wert', () => {
+  // Sonst kann die Route legal zwischen beiden liegen und genau den
+  // Fehlalarm ausloesen, den die Sperre verhindern soll.
+  const auf = [];
+  for (let i = 0; i <= 40; i++) auf.push(destination(START, 90, i * 100));
+  const knapp = { point: destination(auf[20], 0, TOLL_RADIUS_M + 40), toll: true, highway: 'tertiary', name: 'Knapp daneben' };
+  assert.deepEqual(tollRoadsNear(auf, [knapp]), [], 'außerhalb des Sperrradius keine Warnung');
 });

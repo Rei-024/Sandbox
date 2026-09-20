@@ -237,7 +237,8 @@ const PROVIDER_HINTS = {
   brouter:
     'BRouter kennt nur feste Profile: "Autobahn meiden" steuert die Profilwahl. ' +
     'Mautstraßen werden dagegen als Sperrzonen umfahren – dafür braucht es die ' +
-    'Straßendaten oben, und wo es ohne Maut keinen Weg gibt, fällt die Sperre mit Hinweis weg.',
+    'Straßendaten oben. Wo es ohne Maut keinen Weg gibt, fällt die Sperre; gewarnt wird ' +
+    'nur, wenn die fertige Route wirklich an einer Mautstraße entlangführt.',
   openrouteservice:
     'OpenRouteService meidet Autobahn, Maut und Fähren exakt, und das schon im kostenlosen Tarif. ' +
     'Belagsfilter (Schotter) kennt es fürs Auto nicht.',
@@ -446,7 +447,7 @@ async function run() {
       // Ort umfährt. Zusammen ergibt das echtes Maut-Meiden ohne zweiten
       // Dienst und ohne eine einzige zusätzliche Anfrage.
       if (request.avoidToll) {
-        request.nogos = tollNogos(roads, { near: request.start });
+        request.nogos = tollNogos(roads, { keepClear: [request.start, request.end] });
       }
       snap = (waypoints) =>
         snapWaypoints(waypoints, roads, {
@@ -481,7 +482,13 @@ async function run() {
         ? `${candidates.length} von ${gewuenscht} Varianten sind durchgekommen – die beste steht unten.`
         : `${candidates.length} Variante${candidates.length === 1 ? '' : 'n'} durchgerechnet – die beste steht unten.`,
     );
-    const alle = [...netzWarnungen, ...warnings, ...(router.notices ?? []), ...mautHinweis(best)];
+    const alle = [
+      ...netzWarnungen,
+      ...warnings,
+      ...(router.notices ?? []),
+      ...mautHinweis(best),
+      ...aehnlichkeitsHinweis(candidates),
+    ];
     if (alle.length) showAlert(alle.join(' '), 'warn');
     nameRoute(best);
   } catch (err) {
@@ -494,6 +501,26 @@ async function run() {
 }
 
 /**
+ * Drei fast gleiche Runden sind keine Auswahl. Wenn die Gegend nicht mehr
+ * hergibt, ist das eine Eigenschaft der Gegend -- aber der Fahrer soll nicht
+ * rätseln, warum die Varianten so gleich aussehen.
+ */
+function aehnlichkeitsHinweis(candidates) {
+  const gleich = candidates.filter((c) => (c.similarToBest ?? 0) >= 0.6).length;
+  if (!gleich) return [];
+  // Eine feste Richtung hilft nur, wenn die App sie auch nutzt -- bei einer
+  // Einwegstrecke mit gesetztem Ziel bestimmt das Ziel die Richtung.
+  const tipp =
+    state.settings.mode === 'oneway' && state.end
+      ? 'Mit einer anderen Wunschdauer oder einem anderen Ziel'
+      : 'Mit einer anderen Wunschdauer oder einer festen Richtung';
+  return [
+    `${gleich === 1 ? 'Eine Variante ähnelt' : `${gleich} Varianten ähneln`} der besten stark – ` +
+      `hier gibt das Straßennetz kaum andere Runden her. ${tipp} kommt eher etwas Neues heraus.`,
+  ];
+}
+
+/**
  * Wir kennen von jeder Strasse nur einen Mittelpunkt, nicht ihren Verlauf --
  * daher ein Hinweis, keine Gewissheit. Lieber einmal zu oft gewarnt als den
  * Fahrer an eine Mautschranke schicken.
@@ -501,11 +528,14 @@ async function run() {
 function mautHinweis(candidate) {
   if (!state.settings.avoidToll || !state.roads?.length) return [];
   const namen = tollRoadsNear(candidate.coords, state.roads);
+  // Ohne Maut auf der fertigen Strecke gibt es nichts zu melden -- auch dann
+  // nicht, wenn die Sperre unterwegs fallen musste. Sie fällt meist wegen
+  // eines unerreichbaren Wegpunkts, nicht wegen der Maut.
   if (!namen.length) return [];
-  return [
-    `Die Route führt möglicherweise über eine Mautstraße (${namen.slice(0, 3).join(', ')}). ` +
-      'Die Sperrzonen greifen nur dort, wo die Straßendaten die Maut kennen.',
-  ];
+  const grund = candidate.tollBlockLifted
+    ? 'Ohne sie war hier keine Route möglich.'
+    : 'Die Sperrzonen greifen nur dort, wo die Straßendaten die Maut kennen.';
+  return [`Die Route führt möglicherweise über eine Mautstraße (${namen.slice(0, 3).join(', ')}). ${grund}`];
 }
 
 /**

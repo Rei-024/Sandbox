@@ -120,6 +120,15 @@ try {
   await context.route('**/api/interpreter', (r) => {
     overpassCalls++;
     const elements = [];
+    // Eine Mautstraße weit abseits: sie darf Sperrzonen erzeugen, aber
+    // niemals eine Warnung, wenn die Route sie gar nicht berührt.
+    const fern = destination([8.4117, 48.4636], 200, 19000);
+    elements.push({
+      type: 'way',
+      id: 999999,
+      center: { lat: fern[1], lon: fern[0] },
+      tags: { highway: 'tertiary', toll: 'yes', name: 'Testmautstraße' },
+    });
     for (let ring = 6000; ring <= 22000; ring += 4000) {
       for (let grad = 0; grad < 360; grad += 9) {
         const p = destination([8.4117, 48.4636], grad, ring);
@@ -150,13 +159,20 @@ try {
       : [{ display_name: 'Freudenstadt, Baden-Württemberg, Deutschland', lon: '8.4117', lat: '48.4636' }];
     return r.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(body) });
   });
+  let inselFehlerUebrig = 0;
   await context.route('**://brouter.de/**', (r) => {
     routingCalls++;
-    const lonlats = new URL(r.request().url()).searchParams.get('lonlats');
+    const url = new URL(r.request().url());
+    // Unerreichbarer Wegpunkt, solange Sperrzonen mitgeschickt werden --
+    // genau die Lage, in der die App früher fälschlich vor Maut warnte.
+    if (inselFehlerUebrig > 0 && url.searchParams.get('nogos')) {
+      inselFehlerUebrig--;
+      return r.fulfill({ status: 400, body: 'target island detected for section 2' });
+    }
     return r.fulfill({
       status: 200,
       contentType: 'application/json',
-      body: JSON.stringify(fakeGeoJson(lonlats)),
+      body: JSON.stringify(fakeGeoJson(url.searchParams.get('lonlats'))),
     });
   });
 
@@ -273,6 +289,22 @@ try {
     return u.searchParams.get('origin') !== u.searchParams.get('destination');
   });
   check(endsAway, 'Einwegstrecke endet nicht am Start');
+
+  console.log('\n# Kein Maut-Fehlalarm');
+  // Die Sperre muss fallen (Inselfehler), aber die fertige Route berührt
+  // keine Mautstraße -- also darf auch nicht vor Maut gewarnt werden.
+  inselFehlerUebrig = 3;
+  await page.locator('#mode-loop').check({ force: true });
+  await page.locator('#duration').fill('135');
+  await page.click('#generate-btn');
+  await page.waitForFunction(() => !document.getElementById('generate-btn').disabled, null, {
+    timeout: 40000,
+  });
+  const nachSperre = (await page.locator('#alert').isVisible())
+    ? await page.locator('#alert').textContent()
+    : '';
+  check(!/Maut/i.test(nachSperre), `keine Maut-Warnung ohne Maut auf der Route: "${nachSperre.slice(0, 60)}"`);
+  check(await page.locator('#result').isVisible(), 'und trotzdem eine Route');
 
   console.log('\n# Strassennetz nicht erreichbar');
   await context.route('**/api/interpreter', (r) => r.fulfill({ status: 504, body: 'gateway timeout' }));

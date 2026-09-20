@@ -321,7 +321,14 @@ export function retraceRatio(coords, toleranceM = 40, sampleM = 30) {
 export function exciseSpurs(
   coords,
   {
-    joinM = 35,
+    // 45 m: weit genug, dass ein Rueckweg ueber die Gegenspur als derselbe
+    // Weg zaehlt, eng genug, dass getrennte Strassen es nicht tun.
+    joinM = 45,
+    // Hoehenunterschied an der Schliessstelle. Eine Sackgasse kehrt zur
+    // selben Kreuzung zurueck, also auf dieselbe Hoehe. Serpentinenschenkel
+    // liegen zwar waagerecht dicht beieinander, aber uebereinander -- ohne
+    // diese Schranke wurden Bergstrassen zerschnitten.
+    maxHoehendifferenzM = 12,
     minSpurM = 300,
     retraceMin = 0.6,
     maxShare = 0.6,
@@ -343,6 +350,7 @@ export function exciseSpurs(
 
     const spur = findSpur(path, {
       joinM,
+      maxHoehendifferenzM,
       minSpurM,
       retraceMin,
       maxCutM: Math.min(gesamtAnfang * maxShare, nochErlaubt),
@@ -355,6 +363,12 @@ export function exciseSpurs(
   }
   return { coords: path, removedM, cuts };
 }
+
+// Wie weit duerfen Hin- und Rueckweg auseinanderliegen und trotzdem als
+// derselbe Weg gelten. Muss fuer Vorfilter und volle Pruefung gleich sein --
+// eine groesszuegigere Vorauswahl liess versetzte Bogen durch, die dann die
+// Rangliste belegten und den echten Ast verdraengten.
+const TOLERANZ_FAKTOR = 1.2;
 
 /** Punktindex an einer bestimmten Bogenlaenge, binaer gesucht. */
 function indexAt(cum, ziel, lo, hi) {
@@ -393,8 +407,50 @@ function grobeSpiegelung(path, cum, i, j, tolM, proben = 12) {
   return treffer / proben;
 }
 
+/**
+ * Liegen zwei Punkte auf derselben Hoehe?
+ *
+ * Das trennt Sackgasse und Serpentine sauber: eine Sackgasse kehrt zur selben
+ * Kreuzung zurueck (kein Hoehenunterschied), zwei Serpentinenschenkel liegen
+ * waagerecht dicht beieinander, aber uebereinander. Ohne Hoehenangaben
+ * entscheidet die Richtungspruefung allein -- dann wird im Zweifel nicht
+ * geschnitten.
+ */
+function gleicheHoehe(a, b, maxDiffM) {
+  if (!Number.isFinite(a[2]) || !Number.isFinite(b[2])) return true;
+  return Math.abs(a[2] - b[2]) <= maxDiffM;
+}
+
+/**
+ * Faehrt die Route hinter dem Teilweg in dieselbe Richtung weiter wie davor?
+ *
+ * Das unterscheidet eine Sackgasse von einer Serpentine, und das ist der
+ * entscheidende Unterschied:
+ *
+ *   Sackgasse -- die Route kommt von Westen an eine Kreuzung, biegt nach
+ *   Norden ins Tal ab, kommt zurueck und faehrt nach Osten weiter. Vorher
+ *   und nachher: dieselbe Richtung. Der Ast ist ein Anhaengsel.
+ *
+ *   Serpentine -- die Route faehrt einen Schenkel nach Osten, nimmt die Kehre
+ *   und den naechsten Schenkel nach Westen. Vorher und nachher: entgegen-
+ *   gesetzt. Hier waere das "Herausschneiden" kein Anhaengsel, sondern das
+ *   Wegwerfen der halben Bergstrasse.
+ *
+ * Ohne diese Pruefung wurden Serpentinen mit 30 bis 40 Metern Schenkelabstand
+ * zerschnitten -- ausgerechnet das, wofuer man ueberhaupt losfaehrt.
+ */
+function fuehrtWeiter(path, cum, i, j, fensterM = 120, maxWendungGrad = 100) {
+  const vorIdx = indexAt(cum, cum[i] - fensterM, 0, i);
+  const nachIdx = indexAt(cum, cum[j] + fensterM, j, path.length - 1);
+  if (vorIdx >= i || nachIdx <= j) return true; // am Rand nicht beurteilbar
+
+  const davor = bearing(path[vorIdx], path[i]);
+  const danach = bearing(path[j], path[nachIdx]);
+  return angleDiff(davor, danach) <= maxWendungGrad;
+}
+
 /** Den laengsten herausschneidbaren Ast finden, oder null. */
-function findSpur(path, { joinM, minSpurM, retraceMin, maxCutM }) {
+function findSpur(path, { joinM, maxHoehendifferenzM, minSpurM, retraceMin, maxCutM }) {
   if (path.length < 8) return null;
   const cum = cumulativeDistance(path);
   const total = cum[cum.length - 1];
@@ -430,6 +486,7 @@ function findSpur(path, { joinM, minSpurM, retraceMin, maxCutM }) {
       const laenge = cum[j] - cum[i];
       if (laenge < minSpurM || laenge > maxCutM) continue;
       if (distance(path[i], path[j]) > joinM) continue;
+      if (!gleicheHoehe(path[i], path[j], maxHoehendifferenzM)) continue;
       kandidaten.push([i, j, laenge]);
     }
   }
@@ -440,7 +497,7 @@ function findSpur(path, { joinM, minSpurM, retraceMin, maxCutM }) {
   // Route stehen zwei Dutzend lange Nachbarschaften vor dem echten Ast, und
   // der bekommt die volle Pruefung nie zu sehen.
   const bewertet = kandidaten
-    .map((k) => [...k, grobeSpiegelung(path, cum, k[0], k[1], joinM * 1.5)])
+    .map((k) => [...k, grobeSpiegelung(path, cum, k[0], k[1], joinM * TOLERANZ_FAKTOR)])
     .filter((k) => k[3] >= 0.6)
     .sort((a, b) => b[3] - a[3] || b[2] - a[2]);
 
@@ -449,9 +506,50 @@ function findSpur(path, { joinM, minSpurM, retraceMin, maxCutM }) {
   const uebrig = bewertet.length ? bewertet : [...kandidaten].sort((a, b) => b[2] - a[2]);
 
   for (const [i, j] of uebrig.slice(0, 40)) {
-    if (retraceRatio(path.slice(i, j + 1), joinM * 1.5) >= retraceMin) return [i, j];
+    if (retraceRatio(path.slice(i, j + 1), joinM * TOLERANZ_FAKTOR) >= retraceMin) return [i, j];
   }
   return null;
+}
+
+/**
+ * Wie sehr decken sich zwei Routen? 0 = voellig verschieden, 1 = dieselbe.
+ *
+ * Gemittelt ueber beide Richtungen, damit eine kurze Route, die ganz auf
+ * einer langen liegt, nicht als "gleich" durchgeht.
+ */
+export function similarity(a, b, toleranceM = 120, sampleM = 100) {
+  const anteil = (x, y) => {
+    const ziel = resample(y, sampleM);
+    if (!ziel.length) return 0;
+    const degLat = toleranceM / 111320;
+    const degLonAt = (lat) => toleranceM / (111320 * Math.max(0.2, Math.cos(toRad(lat))));
+    const zellen = new Map();
+    for (const p of ziel) {
+      const key = `${Math.round(p[1] / degLat)}:${Math.round(p[0] / degLonAt(p[1]))}`;
+      if (!zellen.has(key)) zellen.set(key, []);
+      zellen.get(key).push(p);
+    }
+    const quelle = resample(x, sampleM);
+    let treffer = 0;
+    for (const p of quelle) {
+      const row = Math.round(p[1] / degLat);
+      const col = Math.round(p[0] / degLonAt(p[1]));
+      let gefunden = false;
+      for (let dr = -1; dr <= 1 && !gefunden; dr++) {
+        for (let dc = -1; dc <= 1 && !gefunden; dc++) {
+          for (const q of zellen.get(`${row + dr}:${col + dc}`) ?? []) {
+            if (distance(p, q) <= toleranceM) {
+              gefunden = true;
+              break;
+            }
+          }
+        }
+      }
+      if (gefunden) treffer++;
+    }
+    return quelle.length ? treffer / quelle.length : 0;
+  };
+  return (anteil(a, b) + anteil(b, a)) / 2;
 }
 
 /** Douglas-Peucker, damit wir z.B. fuer Google Maps wenige Stuetzpunkte haben. */

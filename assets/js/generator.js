@@ -29,6 +29,7 @@ import {
   estimateSpeedKmh,
   levelToDegPerKm,
   overlapDetail,
+  similarity,
 } from './geo.js';
 
 const MAX_ITERATIONS = 3; // Routing-Anfragen je Variante
@@ -312,6 +313,7 @@ export async function generateRoutes(
   const normalized = { ...request, mode, durationMin, curviness, variants };
   const candidates = [];
   const failures = [];
+  const grundrichtung = mulberry32(seed)() * 360;
   const pool = { left: MAX_REPAIRS_TOTAL };
   let lastError = null;
   let requestCount = 0;
@@ -353,7 +355,10 @@ export async function generateRoutes(
 
   for (let v = 0; v < variants; v++) {
     const rng = mulberry32(seed + v * 7919);
-    const bearing0 = bearing != null ? bearing + (v * 360) / variants : rng() * 360;
+    // Richtungen gleichmaessig ueber den Kreis verteilen -- auch wenn dem
+    // Fahrer die Richtung egal ist. Wuerfelte jede Variante fuer sich, kamen
+    // regelmaessig drei fast gleiche Runden heraus.
+    const bearing0 = (bearing ?? grundrichtung) + (v * 360) / variants;
     // Jede Variante bekommt ihren eigenen Reparaturvorrat, sonst frisst die
     // erste in unwegsamem Gelaende alles auf und die anderen fallen aus.
     const budget = { left: Math.min(pool.left, MAX_REPAIRS_PER_VARIANT) };
@@ -428,8 +433,7 @@ export async function generateRoutes(
   // Beim Nachjustieren entstehen je Variante mehrere Routen. Alle zu zeigen
   // waere Augenwischerei -- sie unterscheiden sich kaum und widersprechen der
   // Einstellung "wie viele Varianten". Also je Variante die beste behalten.
-  const shortlist = bestPerVariant(candidates);
-  shortlist.sort((a, b) => a.score - b.score);
+  const shortlist = nachVielfalt(bestPerVariant(candidates).sort((a, b) => a.score - b.score));
   shortlist.forEach((c, i) => {
     c.rank = i + 1;
   });
@@ -484,6 +488,30 @@ function explain(lastError, failures = []) {
     );
   }
   return new Error(lastError.message + anhang);
+}
+
+/**
+ * Die beste zuerst, danach jeweils die naechste, die sich von den schon
+ * gewaehlten deutlich unterscheidet. Drei fast gleiche Vorschlaege sind keine
+ * Auswahl -- lieber eine etwas schlechtere Runde, die woanders langfuehrt.
+ */
+export function nachVielfalt(sortiert, maxAehnlichkeit = 0.6) {
+  const gewaehlt = [];
+  const rest = [...sortiert];
+  while (rest.length) {
+    let idx = rest.findIndex((c) =>
+      gewaehlt.every((g) => similarity(c.coords, g.coords) < maxAehnlichkeit),
+    );
+    if (idx < 0) idx = 0; // nichts Verschiedenes mehr uebrig
+    const [naechste] = rest.splice(idx, 1);
+    // Gegen *alle* schon gewaehlten messen, nicht nur gegen die beste: sonst
+    // bleibt ein fast gleiches Paar auf den hinteren Plaetzen unbemerkt.
+    naechste.similarToBest = gewaehlt.length
+      ? Math.max(...gewaehlt.map((g) => similarity(naechste.coords, g.coords)))
+      : 0;
+    gewaehlt.push(naechste);
+  }
+  return gewaehlt;
 }
 
 /** Aus allen Versuchen je Startwinkel den besten herausziehen. */
@@ -766,6 +794,7 @@ function finalize(route, waypoints, request, extra = {}) {
     waypoints: verbliebene,
     spurCuts: geschnitten.cuts,
     spursRemovedM: geschnitten.removedM,
+    tollBlockLifted: bereinigt.tollBlockLifted ?? false,
     ...m,
     ...extra,
     score: scoreCandidate(m, request),

@@ -287,7 +287,7 @@ test('Ohne Sperrzonen bleibt die URL unveraendert', async () => {
   }
 });
 
-test('Gibt es ohne Maut keinen Weg, faellt die Sperre – mit Hinweis', async () => {
+test('Gibt es ohne Maut keinen Weg, faellt die Sperre – aber ohne Warnung', async () => {
   const original = globalThis.fetch;
   const urls = [];
   globalThis.fetch = async (url) => {
@@ -299,13 +299,17 @@ test('Gibt es ohne Maut keinen Weg, faellt die Sperre – mit Hinweis', async ()
   };
   try {
     const br = new BRouterAdapter();
-    const route = await br.route([START, START], { nogos: [[13.5, 47.5, 250]] });
+    const route = await br.route([START, START], { nogos: [[13.5, 47.5, 150]] });
 
     assert.equal(urls.length, 2, 'zweiter Anlauf ohne Sperre');
     assert.ok(urls[0].includes('nogos'));
     assert.ok(!urls[1].includes('nogos'));
     assert.equal(route.distanceM, 84000, 'lieber eine Route mit Maut als gar keine');
-    assert.ok(br.notices[0].includes('Mautstraßen'), 'aber der Fahrer erfährt es');
+    assert.equal(route.tollBlockLifted, true, 'die Oberfläche erfährt es als Markierung');
+    // Und eben NICHT als Warnung: unerreichbare Wegpunkte sind im Gebirge
+    // Alltag und haben meist nichts mit Maut zu tun. Ob gewarnt wird,
+    // entscheidet erst die fertige Strecke.
+    assert.deepEqual(br.notices, []);
   } finally {
     globalThis.fetch = original;
   }
