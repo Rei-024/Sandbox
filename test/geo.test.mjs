@@ -296,33 +296,66 @@ test('similarity erkennt gleiche und verschiedene Routen', () => {
   assert.ok(similarity(a, c) < 0.05, 'andere Gegend');
 });
 
+/** Kehren: Schenkel dicht nebeneinander, Route klettert dabei. */
+function serpentinen({ abstandM = 30, steigung = 0.06, kehren = 8, schenkelM = 250 } = {}) {
+  const pts = [];
+  let basis = FREUDENSTADT;
+  let gefahren = 0;
+  for (let k = 0; k < kehren; k++) {
+    const richtung = k % 2 ? 270 : 90;
+    for (let i = 0; i <= schenkelM / 25; i++) {
+      const p = destination(basis, richtung, i * 25);
+      pts.push([p[0], p[1], 600 + (gefahren + i * 25) * steigung]);
+    }
+    gefahren += schenkelM + abstandM;
+    basis = destination(destination(basis, richtung, schenkelM), 0, abstandM);
+  }
+  return pts;
+}
+
 test('Serpentinen werden nicht als Sackgasse missverstanden', () => {
   // Zwei Kehrenschenkel liegen waagerecht dicht beieinander und sehen wie
-  // hin-und-zurueck aus. Sie liegen aber uebereinander -- ohne die
-  // Hoehenpruefung wurde ausgerechnet die Bergstrasse zerschnitten.
-  const serpentinen = (abstandM, kehren = 8, schenkelM = 250, steigung = 0.1) => {
-    const pts = [];
-    let basis = FREUDENSTADT;
-    let gefahren = 0;
-    for (let k = 0; k < kehren; k++) {
-      const richtung = k % 2 ? 270 : 90;
-      for (let i = 0; i <= schenkelM / 25; i++) {
-        const p = destination(basis, richtung, i * 25);
-        pts.push([p[0], p[1], 600 + (gefahren + i * 25) * steigung]);
-      }
-      gefahren += schenkelM + abstandM;
-      basis = destination(destination(basis, richtung, schenkelM), 0, abstandM);
-    }
-    return pts;
-  };
-
-  for (const abstand of [20, 30, 40, 60]) {
-    assert.equal(
-      exciseSpurs(serpentinen(abstand)).cuts,
-      0,
-      `Serpentine mit ${abstand} m Schenkelabstand wurde zerschnitten`,
-    );
+  // hin-und-zurueck aus. Das darf nie geschnitten werden -- es waere
+  // ausgerechnet das Wegwerfen der Bergstrasse.
+  for (const abstandM of [15, 20, 30, 40, 60]) {
+    assert.equal(exciseSpurs(serpentinen({ abstandM })).cuts, 0, `Abstand ${abstandM} m`);
   }
+});
+
+test('Auch flache Kehren ueberleben – nicht jede Serpentine klettert', () => {
+  // Eine feste Hoehenschranke reicht dafuer nicht: eine Kehre mit 0,3 %
+  // Steigung gewinnt auf 500 m keine zwei Meter. Hier traegt die
+  // Richtungspruefung: hinter einer Kehre geht es zurueck, hinter einer
+  // Sackgasse weiter.
+  for (const steigung of [0.02, 0.01, 0.003, 0]) {
+    assert.equal(exciseSpurs(serpentinen({ steigung })).cuts, 0, `Steigung ${steigung * 100} %`);
+  }
+});
+
+test('Kurze Kehrenschenkel ueberleben ebenfalls', () => {
+  for (const schenkelM of [100, 150, 200]) {
+    assert.equal(exciseSpurs(serpentinen({ schenkelM, kehren: 10 })).cuts, 0, `${schenkelM} m`);
+  }
+});
+
+test('Ein Ast wird bis zur Abzweigung entfernt, nicht nur die Spitze', () => {
+  // Gefunden wird meist ein Paar innerhalb des Astes. Ohne Ausdehnen bliebe
+  // ein doppelt gefahrener Stummel stehen.
+  const haupt = [];
+  for (let i = 0; i <= 400; i++) haupt.push(destination(FREUDENSTADT, 90, i * 25));
+  const hin = [];
+  let p = haupt[200];
+  for (let i = 1; i <= 120; i++) {
+    p = destination(p, 0, 25);
+    hin.push(p);
+  }
+  const route = [...haupt.slice(0, 201), ...hin, ...hin.slice(0, -1).reverse(), ...haupt.slice(201)];
+
+  const { coords, removedM, cuts } = exciseSpurs(route);
+  assert.equal(cuts, 1);
+  // 3 km hinein und wieder heraus: es muessen annaehernd 6 km fallen.
+  assert.ok(removedM > 5800, `nur ${removedM.toFixed(0)} m entfernt – Stummel geblieben?`);
+  assert.ok(overlapRatio(coords) < 0.02, 'und nichts Doppeltes uebrig');
 });
 
 test('Eine Sackgasse am Berg wird trotz Hoehenunterschied erkannt', () => {

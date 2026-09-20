@@ -357,8 +357,14 @@ export function exciseSpurs(
     });
     if (!spur) break;
     const [i, j] = spur;
+    const ende = path[path.length - 1];
     removedM += lineLength(path.slice(i, j + 1));
     path = path.slice(0, i + 1).concat(path.slice(j + 1));
+    // Liegt der Ast ganz am Schluss, faellt sonst der letzte Punkt mit weg --
+    // eine Runde endete dann nicht mehr am Start, eine Einwegstrecke nicht
+    // mehr am Ziel. Der Endpunkt wird deshalb wieder angehaengt; er liegt
+    // ohnehin innerhalb der Schliesstoleranz.
+    if (distance(path[path.length - 1], ende) > 1) path.push(ende);
     cuts++;
   }
   return { coords: path, removedM, cuts };
@@ -408,13 +414,11 @@ function grobeSpiegelung(path, cum, i, j, tolM, proben = 12) {
 }
 
 /**
- * Liegen zwei Punkte auf derselben Hoehe?
+ * Liegen zwei Punkte grob auf derselben Hoehe? Billige Vorabpruefung.
  *
- * Das trennt Sackgasse und Serpentine sauber: eine Sackgasse kehrt zur selben
- * Kreuzung zurueck (kein Hoehenunterschied), zwei Serpentinenschenkel liegen
- * waagerecht dicht beieinander, aber uebereinander. Ohne Hoehenangaben
- * entscheidet die Richtungspruefung allein -- dann wird im Zweifel nicht
- * geschnitten.
+ * Eine Sackgasse kehrt zur selben Kreuzung zurueck, Serpentinenschenkel
+ * liegen uebereinander. Das greift nur bei deutlichem Anstieg -- die feine
+ * Unterscheidung macht hoehenProfilPasst am fertigen Teilweg.
  */
 function gleicheHoehe(a, b, maxDiffM) {
   if (!Number.isFinite(a[2]) || !Number.isFinite(b[2])) return true;
@@ -422,31 +426,106 @@ function gleicheHoehe(a, b, maxDiffM) {
 }
 
 /**
+ * Passt das Hoehenprofil zu einer Sackgasse -- oder klettert der Teilweg?
+ *
+ * Eine feste Meterschranke reicht nicht: nicht jede Kehre gewinnt zwoelf
+ * Meter. Entscheidend ist das Verhaeltnis. Eine Sackgasse geht hinauf und
+ * dieselben Meter wieder hinunter, der Nettogewinn ist also fast null, egal
+ * wie steil sie war. Ein Serpentinenpaar klettert dagegen durchgehend: fast
+ * jeder bewegte Hoehenmeter ist auch ein gewonnener.
+ *
+ *   Sackgasse, 200 m hinauf und zurueck -> netto 0 von 200 bewegten
+ *   flache Kehre, 8 m Anstieg           -> netto 8 von 8 bewegten
+ *
+ * Damit faellt auch die flache Kehre auf, die an einer Meterschranke
+ * durchrutschen wuerde.
+ */
+function hoehenProfilPasst(sub, { maxAbsM = 12, anteil = 0.4, rauschenM = 3 } = {}) {
+  const mitHoehe = sub.filter((p) => Number.isFinite(p[2]));
+  if (mitHoehe.length < 2) return true; // ohne Hoehendaten nicht beurteilbar
+  const netto = Math.abs(mitHoehe[mitHoehe.length - 1][2] - mitHoehe[0][2]);
+  if (netto <= rauschenM) return true;
+  if (netto > maxAbsM) return false;
+
+  const stats = elevationStats(sub, 2);
+  if (!stats) return true;
+  const bewegt = Math.max(stats.ascent, stats.descent);
+  return netto <= Math.max(rauschenM, bewegt * anteil);
+}
+
+/**
+ * Punkt ein Stueck vor bzw. hinter einer Stelle -- bei einer Runde ueber den
+ * Anfang hinweg. Ohne dieses Umlaufen liesse sich am Start und Ziel einer
+ * Runde nicht beurteilen, wie es weitergeht, und genau dort rutschten
+ * Serpentinen durch.
+ */
+function punktVor(path, cum, i, fensterM, geschlossen) {
+  if (cum[i] >= fensterM) {
+    // Mindestens zwei Knoten zurueck: bei grober Knotendichte laege der
+    // Rueckblick sonst noch in der Abzweigung selbst, und gemessen wuerde
+    // die Richtung in den Ast hinein statt die der durchgehenden Strasse.
+    return path[Math.max(0, Math.min(indexAt(cum, cum[i] - fensterM, 0, i), i - 2))];
+  }
+  if (!geschlossen) return null;
+  const total = cum[cum.length - 1];
+  return path[indexAt(cum, total - (fensterM - cum[i]), 0, cum.length - 1)];
+}
+
+function punktNach(path, cum, j, fensterM, geschlossen) {
+  const total = cum[cum.length - 1];
+  const letzter = path.length - 1;
+  if (total - cum[j] >= fensterM) {
+    return path[Math.min(letzter, Math.max(indexAt(cum, cum[j] + fensterM, j, letzter), j + 2))];
+  }
+  if (!geschlossen) return null;
+  return path[indexAt(cum, fensterM - (total - cum[j]), 0, letzter)];
+}
+
+/**
  * Faehrt die Route hinter dem Teilweg in dieselbe Richtung weiter wie davor?
  *
- * Das unterscheidet eine Sackgasse von einer Serpentine, und das ist der
- * entscheidende Unterschied:
+ * Das trennt Sackgasse und Serpentine unabhaengig von der Hoehe:
  *
- *   Sackgasse -- die Route kommt von Westen an eine Kreuzung, biegt nach
- *   Norden ins Tal ab, kommt zurueck und faehrt nach Osten weiter. Vorher
- *   und nachher: dieselbe Richtung. Der Ast ist ein Anhaengsel.
+ *   Sackgasse -- von Westen an die Kreuzung, nach Norden ins Tal, zurueck,
+ *   dann nach Osten weiter. Vorher und nachher dieselbe Richtung; der Ast
+ *   ist ein Anhaengsel.
  *
- *   Serpentine -- die Route faehrt einen Schenkel nach Osten, nimmt die Kehre
- *   und den naechsten Schenkel nach Westen. Vorher und nachher: entgegen-
- *   gesetzt. Hier waere das "Herausschneiden" kein Anhaengsel, sondern das
- *   Wegwerfen der halben Bergstrasse.
- *
- * Ohne diese Pruefung wurden Serpentinen mit 30 bis 40 Metern Schenkelabstand
- * zerschnitten -- ausgerechnet das, wofuer man ueberhaupt losfaehrt.
+ *   Serpentine -- ein Schenkel nach Osten, Kehre, naechster Schenkel nach
+ *   Westen. Vorher und nachher entgegengesetzt. Hier waere das Schneiden
+ *   kein Entfernen eines Anhaengsels, sondern das Wegwerfen der Bergstrasse.
  */
 function fuehrtWeiter(path, cum, i, j, fensterM = 120, maxWendungGrad = 100) {
-  const vorIdx = indexAt(cum, cum[i] - fensterM, 0, i);
-  const nachIdx = indexAt(cum, cum[j] + fensterM, j, path.length - 1);
-  if (vorIdx >= i || nachIdx <= j) return true; // am Rand nicht beurteilbar
+  const geschlossen = distance(path[0], path[path.length - 1]) < 150;
+  const vor = punktVor(path, cum, i, fensterM, geschlossen);
+  const nach = punktNach(path, cum, j, fensterM, geschlossen);
+  if (!vor || !nach) return true; // am Rand nicht beurteilbar
 
-  const davor = bearing(path[vorIdx], path[i]);
-  const danach = bearing(path[j], path[nachIdx]);
-  return angleDiff(davor, danach) <= maxWendungGrad;
+  return angleDiff(bearing(vor, path[i]), bearing(path[j], nach)) <= maxWendungGrad;
+}
+
+/**
+ * Ein gefundenes Astpaar nach aussen bis zur Abzweigung ausdehnen.
+ *
+ * Gefunden wird meist ein Paar *innerhalb* des Astes -- an der Abzweigung
+ * selbst laufen Hin- und Rueckweg oft ein paar Meter weiter auseinander als
+ * die Suchtoleranz erlaubt. Schneidet man dieses innere Paar, bleibt ein
+ * doppelt gefahrener Stummel stehen, und die Richtungspruefung sieht an
+ * dieser Stelle eine Kehre statt einer Abzweigung.
+ *
+ * Deshalb erst hinauslaufen, solange sich Hin- und Rueckweg noch decken --
+ * danach liegen die Enden an der Abzweigung, der ganze Ast faellt, und die
+ * Richtungspruefung urteilt an der richtigen Stelle.
+ */
+function erweitereSpur(path, cum, i, j, tolM, maxCutM) {
+  let a = i;
+  let b = j;
+  while (a > 0 && b < path.length - 1) {
+    if (distance(path[a - 1], path[b + 1]) > tolM) break;
+    if (cum[b + 1] - cum[a - 1] > maxCutM) break;
+    a--;
+    b++;
+  }
+  return [a, b];
 }
 
 /** Den laengsten herausschneidbaren Ast finden, oder null. */
@@ -506,7 +585,15 @@ function findSpur(path, { joinM, maxHoehendifferenzM, minSpurM, retraceMin, maxC
   const uebrig = bewertet.length ? bewertet : [...kandidaten].sort((a, b) => b[2] - a[2]);
 
   for (const [i, j] of uebrig.slice(0, 40)) {
-    if (retraceRatio(path.slice(i, j + 1), joinM * TOLERANZ_FAKTOR) >= retraceMin) return [i, j];
+    // Erst bis zur Abzweigung ausdehnen, dann urteilen. Drei Huerden: die
+    // Route muss hinter dem Ast in dieselbe Richtung weiterfahren wie davor,
+    // der Teilweg darf nicht klettern, und Hin- und Rueckweg muessen sich
+    // wirklich decken.
+    const [a, b] = erweitereSpur(path, cum, i, j, joinM * 2, maxCutM);
+    if (!fuehrtWeiter(path, cum, a, b)) continue;
+    const teilweg = path.slice(a, b + 1);
+    if (!hoehenProfilPasst(teilweg)) continue;
+    if (retraceRatio(teilweg, joinM * TOLERANZ_FAKTOR) >= retraceMin) return [a, b];
   }
   return null;
 }
