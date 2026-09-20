@@ -230,6 +230,10 @@ export class GraphHopperAdapter {
     // Der kostenlose Tarif erlaubt fuenf Punkte je Anfrage. Sagt der Server
     // etwas anderes, merken wir uns das (siehe #post).
     this.maxPoints = maxPoints;
+    // Der flexible Modus (ch.disable) traegt Custom-Model und Rundkurs-Suche.
+    // Gratis-Tarife lehnen ihn ab -- das merkt man erst an der Antwort.
+    this.flexible = true;
+    this.notices = [];
     this.provider = 'graphhopper';
   }
 
@@ -237,14 +241,16 @@ export class GraphHopperAdapter {
     // Hier koennen wir per Custom-Model wirklich pro Anfrage steuern,
     // welche Strassenklassen bevorzugt oder gemieden werden -- und
     // GraphHopper bringt einen eigenen Rundkurs-Algorithmus mit.
-    return {
-      avoidMotorway: 'exact',
-      avoidUnpaved: 'exact',
-      avoidToll: 'exact',
-      roundTrip: true,
-      needsKey: true,
-      maxPoints: this.maxPoints,
-    };
+    return this.flexible
+      ? {
+          avoidMotorway: 'exact',
+          avoidUnpaved: 'exact',
+          avoidToll: 'exact',
+          roundTrip: true,
+          needsKey: true,
+          maxPoints: this.maxPoints,
+        }
+      : { avoidMotorway: 'no', avoidUnpaved: 'no', avoidToll: 'no', roundTrip: false, needsKey: true, maxPoints: this.maxPoints };
   }
 
   /**
@@ -254,6 +260,12 @@ export class GraphHopperAdapter {
    * scheitern.
    */
   async roundTrip(start, distanceM, { seed = 1, curviness = 3, avoidMotorway = true, avoidUnpaved = true, avoidToll = true, signal } = {}) {
+    if (!this.flexible) {
+      throw new RoutingError(
+        'Rundkurs-Suche braucht den flexiblen Modus, den dieser Tarif nicht erlaubt.',
+        { provider: 'graphhopper', kind: 'plan-limited', retryable: false },
+      );
+    }
     return this.#post(
       {
         points: [[round6(start[0]), round6(start[1])]],
@@ -293,6 +305,11 @@ export class GraphHopperAdapter {
   }
 
   async #post(payload, profileLabel, signal) {
+    // Zweiter Anlauf ohne die Extras, falls der Tarif sie verweigert.
+    if (!this.flexible && payload['ch.disable']) {
+      const { 'ch.disable': _weg, custom_model: _auch, ...schlicht } = payload;
+      payload = schlicht;
+    }
     if (!this.apiKey) {
       throw new RoutingError(
         'Für GraphHopper fehlt der API-Key. Kostenlos auf graphhopper.com anlegen und in den Einstellungen eintragen.',
@@ -325,6 +342,27 @@ export class GraphHopperAdapter {
 
       // "Too many points for Routing API: 10, allowed: 5" -- der Server nennt
       // die Tarifgrenze. Die merken wir uns, statt sie zu erraten.
+      // "Free packages cannot use flexible mode" -- ohne flexiblen Modus
+      // faellt weg, wofuer man GraphHopper hier ueberhaupt wollte. Einmal
+      // merken, kuenftig schlicht anfragen und es dem Nutzer sagen.
+      if (/flexible mode/i.test(msg) && this.flexible) {
+        this.flexible = false;
+        this.notices = [
+          'Dein GraphHopper-Tarif erlaubt den flexiblen Modus nicht. Damit entfallen dort ' +
+            'Autobahn- und Maut-Meiden sowie die Rundkurs-Suche – für diese App ist BRouter ' +
+            'oder OpenRouteService die bessere Wahl.',
+        ];
+        const { 'ch.disable': _weg, custom_model: _auch, algorithm, ...schlicht } = payload;
+        if (algorithm) {
+          throw new RoutingError('Rundkurs-Suche braucht den flexiblen Modus.', {
+            provider: 'graphhopper',
+            kind: 'plan-limited',
+            retryable: false,
+          });
+        }
+        return this.#post(schlicht, `${profileLabel} (ohne flexiblen Modus)`, signal);
+      }
+
       const grenze = msg.match(/too many points.*allowed:\s*(\d+)/i);
       if (grenze) {
         this.maxPoints = Number(grenze[1]);
@@ -409,6 +447,162 @@ function buildCustomModel(curviness, avoidMotorway, avoidUnpaved, avoidToll = tr
   return { priority };
 }
 
+/* --------------------------------------------------- OpenRouteService */
+
+/**
+ * OpenRouteService: kostenloser Key, und anders als bei GraphHopper gehoeren
+ * "Autobahn meiden" und "Maut meiden" dort zum Gratis-Umfang -- sie laufen
+ * ueber `avoid_features` und brauchen keinen Sondermodus.
+ */
+export class OpenRouteServiceAdapter {
+  constructor({ apiKey, baseUrl = 'https://api.openrouteservice.org/v2/directions', maxPoints = 25 } = {}) {
+    this.apiKey = (apiKey ?? '').trim();
+    this.baseUrl = baseUrl.replace(/\/+$/, '');
+    this.maxPoints = maxPoints;
+    // Ob der Dienst Rundkurse fuers Auto anbietet, zeigt erst der Versuch.
+    this.supportsRoundTrip = true;
+    this.notices = [];
+    this.provider = 'openrouteservice';
+  }
+
+  get capabilities() {
+    return {
+      avoidMotorway: 'exact',
+      avoidUnpaved: 'no', // fuers Auto kennt ORS keine Belagsfilter
+      avoidToll: 'exact',
+      roundTrip: this.supportsRoundTrip,
+      needsKey: true,
+      maxPoints: this.maxPoints,
+    };
+  }
+
+  async route(points, { curviness = 3, avoidMotorway = true, avoidToll = true, signal } = {}) {
+    return this.#post(
+      {
+        coordinates: points.map((p) => [round6(p[0]), round6(p[1])]),
+        ...this.#common(curviness, avoidMotorway, avoidToll),
+      },
+      'driving-car',
+      signal,
+    );
+  }
+
+  async roundTrip(start, distanceM, { seed = 1, curviness = 3, avoidMotorway = true, avoidToll = true, signal } = {}) {
+    if (!this.supportsRoundTrip) {
+      throw new RoutingError('Rundkurs-Suche steht bei diesem Dienst nicht zur Verfügung.', {
+        provider: 'openrouteservice',
+        kind: 'plan-limited',
+        retryable: false,
+      });
+    }
+    const body = {
+      coordinates: [[round6(start[0]), round6(start[1])]],
+      ...this.#common(curviness, avoidMotorway, avoidToll),
+    };
+    body.options = {
+      ...body.options,
+      round_trip: {
+        length: Math.round(distanceM),
+        points: Math.max(3, 3 + Math.round(curviness)),
+        seed: Math.round(seed),
+      },
+    };
+    try {
+      return await this.#post(body, 'driving-car round_trip', signal);
+    } catch (err) {
+      // Einmal reicht: kann der Dienst es nicht, nicht bei jeder Variante erneut fragen.
+      if (err.name !== 'AbortError') this.supportsRoundTrip = false;
+      throw err;
+    }
+  }
+
+  #common(curviness, avoidMotorway, avoidToll) {
+    const avoid = [];
+    if (avoidMotorway) avoid.push('highways');
+    if (avoidToll) avoid.push('tollways');
+    avoid.push('ferries');
+    return {
+      elevation: true,
+      instructions: false,
+      // "recommended" nimmt eher die angenehmen Strassen als die schnellsten.
+      preference: curviness >= 3 ? 'recommended' : 'fastest',
+      options: { avoid_features: avoid },
+    };
+  }
+
+  async #post(body, profileLabel, signal) {
+    if (!this.apiKey) {
+      throw new RoutingError(
+        'Für OpenRouteService fehlt der API-Key. Kostenlos auf openrouteservice.org anlegen und in den Einstellungen eintragen.',
+        { provider: 'openrouteservice', retryable: false },
+      );
+    }
+
+    let res;
+    try {
+      res = await fetchWithTimeout(
+        `${this.baseUrl}/driving-car/geojson`,
+        {
+          method: 'POST',
+          headers: { Authorization: this.apiKey, 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+          signal,
+        },
+        DEFAULT_TIMEOUT_MS,
+      );
+    } catch (err) {
+      if (err.name === 'AbortError') throw err;
+      throw new RoutingError('OpenRouteService ist nicht erreichbar.', {
+        provider: 'openrouteservice',
+        retryable: false,
+      });
+    }
+
+    const json = await res.json().catch(() => null);
+    if (!res.ok) {
+      const msg = json?.error?.message ?? json?.error ?? `HTTP ${res.status}`;
+      const grenze = String(msg).match(/total of (\d+) locations/i);
+      if (grenze) {
+        this.maxPoints = Number(grenze[1]);
+        throw new RoutingError(
+          `OpenRouteService erlaubt nur ${this.maxPoints} Punkte je Anfrage.`,
+          { provider: 'openrouteservice', kind: 'too-many-points', maxPoints: this.maxPoints },
+        );
+      }
+      const unreachable = /route could not be found|no route|point .* could not be/i.test(String(msg));
+      throw new RoutingError(
+        unreachable
+          ? 'Zwischen zwei Wegpunkten gibt es keine befahrbare Verbindung.'
+          : `OpenRouteService: ${msg}`,
+        {
+          provider: 'openrouteservice',
+          status: res.status,
+          retryable: res.status === 429 || res.status >= 500,
+          kind: unreachable ? 'unreachable' : 'other',
+        },
+      );
+    }
+
+    const feature = json?.features?.[0];
+    const coords = feature?.geometry?.coordinates;
+    if (!Array.isArray(coords) || coords.length < 2) {
+      throw new RoutingError('OpenRouteService hat keine Route gefunden.', {
+        provider: 'openrouteservice',
+        kind: 'unreachable',
+      });
+    }
+    const props = feature.properties ?? {};
+    return {
+      coords,
+      distanceM: props.summary?.distance ?? 0,
+      routerTimeS: props.summary?.duration ?? null,
+      ascentM: props.ascent ?? null,
+      provider: 'openrouteservice',
+      profileUsed: profileLabel,
+    };
+  }
+}
+
 /* -------------------------------------------------------------- Geocoding */
 
 const NOMINATIM = 'https://nominatim.openstreetmap.org';
@@ -457,6 +651,9 @@ export async function reverseGeocode(point, { signal } = {}) {
 export function createRouter(settings) {
   if (settings.provider === 'graphhopper') {
     return new GraphHopperAdapter({ apiKey: settings.graphhopperKey });
+  }
+  if (settings.provider === 'openrouteservice') {
+    return new OpenRouteServiceAdapter({ apiKey: settings.orsKey });
   }
   return new BRouterAdapter({
     baseUrl: settings.brouterUrl || undefined,

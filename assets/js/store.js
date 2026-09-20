@@ -24,6 +24,7 @@ export const DEFAULTS = {
   brouterProfile: 'auto',
   brouterUrl: '',
   graphhopperKey: '',
+  orsKey: '',
 };
 
 export function loadSettings() {

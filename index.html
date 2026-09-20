@@ -148,7 +148,8 @@
             <label class="label" for="provider">Routing-Dienst</label>
             <select id="provider">
               <option value="brouter">BRouter (kostenlos, ohne Anmeldung)</option>
-              <option value="graphhopper">GraphHopper (API-Key nötig)</option>
+              <option value="openrouteservice">OpenRouteService (kostenloser Key)</option>
+              <option value="graphhopper">GraphHopper (Key, Gratis-Tarif eingeschränkt)</option>
             </select>
 
             <div id="brouter-options">
@@ -156,6 +157,15 @@
               <select id="brouter-profile"></select>
               <label class="label" for="brouter-url">Eigener BRouter-Server (optional)</label>
               <input type="url" id="brouter-url" placeholder="https://brouter.de/brouter" autocomplete="off" />
+            </div>
+
+            <div id="ors-options" hidden>
+              <label class="label" for="ors-key">OpenRouteService API-Key</label>
+              <input type="password" id="ors-key" autocomplete="off" placeholder="Key von openrouteservice.org" />
+              <p class="hint">
+                Wird nur in diesem Browser gespeichert und ausschließlich an openrouteservice.org
+                geschickt.
+              </p>
             </div>
 
             <div id="graphhopper-options" hidden>

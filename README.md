@@ -100,7 +100,7 @@ entgegen: *„Autobahn meiden“* steuert hier also die Profilwahl und ist damit
 eine starke Bevorzugung, keine Garantie. Ein eigener BRouter-Server lässt sich
 in den Feineinstellungen eintragen.
 
-**GraphHopper** – braucht einen kostenlosen API-Key von
+**GraphHopper** – braucht einen API-Key von
 [graphhopper.com](https://www.graphhopper.com/). Dafür kann die App dort
 Straßenklassen direkt gewichten (`custom_model`): Autobahn, Schnellstraße,
 Schotter, Fähren **und Mautstraßen** werden wirklich gemieden, kleine Straßen
@@ -109,18 +109,33 @@ Rundkurs-Suche mit – die arbeitet direkt auf dem Straßengraphen, statt Wegpun
 zu würfeln, und umgeht damit Sackgassen und Stichstraßen von vornherein. Im
 Gebirge ist das der spürbar bessere Weg.
 
+**OpenRouteService** – kostenloser Key von
+[openrouteservice.org](https://openrouteservice.org/). Autobahn, Maut und
+Fähren werden über `avoid_features` exakt gemieden, und zwar **schon im
+kostenlosen Tarif**. Belagsfilter (Schotter) kennt es fürs Auto nicht.
+
 Was welcher Dienst kann:
 
-| | BRouter | GraphHopper |
-|---|---|---|
-| API-Key nötig | nein | ja (kostenlos) |
-| Autobahn meiden | über die Profilwahl | exakt |
-| Mautstraßen meiden | nur die Wegpunkte | exakt |
-| Rundkurs-Suche | eigene Wegpunkte | eingebaut |
-| Kurvigkeit | Wegpunkte + Straßenklasse | zusätzlich pro Straße gewichtet |
+| | BRouter | OpenRouteService | GraphHopper gratis |
+|---|---|---|---|
+| API-Key nötig | nein | ja (kostenlos) | ja |
+| Autobahn meiden | über die Profilwahl | **exakt** | nein |
+| Mautstraßen meiden | nur die Wegpunkte | **exakt** | nein |
+| Schotter meiden | über die Profilwahl | nein | nein |
+| Rundkurs-Suche | eigene Wegpunkte | Versuch, sonst Wegpunkte | nein |
+| Punkte je Anfrage | 30 | 25 | 5 |
 
-Beide Dienste sind über die Feineinstellungen umschaltbar. Streikt die
+> **GraphHopper im Gratis-Tarif lohnt für diese App nicht.** Autobahn-/Maut-Meiden
+> und die Rundkurs-Suche brauchen dort den flexiblen Modus (`ch.disable`), und
+> den lehnt der kostenlose Tarif ab („Free packages cannot use flexible mode").
+> Übrig bleibt schnellstes Autorouting ohne Eco-Profil – weniger, als BRouter
+> ohne jeden Key liefert. Die App erkennt das, fragt danach schlicht weiter und
+> sagt es in der Oberfläche.
+
+Alle Dienste sind über die Feineinstellungen umschaltbar. Streikt eine
 Rundkurs-Suche, fällt die App auf die eigenen Wegpunkte zurück und sagt es.
+Verrät ein Dienst seine Punktgrenze erst in der Fehlermeldung, lernt die App
+sie daraus.
 
 ## Was die App nicht kann
 
@@ -158,7 +173,7 @@ außen gehen nur die Anfragen an den gewählten Routing-Dienst, an Nominatim
 ## Tests
 
 ```bash
-npm test                                            # 67 Unit-Tests, ohne Netz
+npm test                                            # 78 Unit-Tests, ohne Netz
 NODE_PATH=$(npm root -g) node test/browser/smoke.mjs # kompletter Ablauf im Browser
 ```
 

@@ -135,6 +135,10 @@ function wireEvents() {
     state.settings.graphhopperKey = e.target.value.trim();
     persist();
   });
+  $('ors-key').addEventListener('input', (e) => {
+    state.settings.orsKey = e.target.value.trim();
+    persist();
+  });
 
   wireSearch($('start-input'), $('start-suggest'), (point, label) => setStart(point, label, { pan: true }));
   wireSearch($('end-input'), $('end-suggest'), (point, label) => setEnd(point, label));
@@ -193,6 +197,7 @@ function restoreForm() {
   $('brouter-profile').value = s.brouterProfile;
   $('brouter-url').value = s.brouterUrl;
   $('graphhopper-key').value = s.graphhopperKey;
+  $('ors-key').value = s.orsKey;
   if (s.startLabel) $('start-input').value = s.startLabel;
 
   select('curviness', s.curviness);
@@ -222,13 +227,25 @@ function setMode(value) {
   persist();
 }
 
+const PROVIDER_HINTS = {
+  brouter:
+    'BRouter kennt nur feste Profile: "Autobahn meiden" steuert die Profilwahl. ' +
+    '"Mautstraßen meiden" hält nur die Wegpunkte fern – zwischen ihnen kann die Route trotzdem über Maut führen.',
+  openrouteservice:
+    'OpenRouteService meidet Autobahn, Maut und Fähren exakt, und das schon im kostenlosen Tarif. ' +
+    'Belagsfilter (Schotter) kennt es fürs Auto nicht.',
+  graphhopper:
+    'Achtung: GraphHopper braucht für Autobahn-/Maut-Meiden und die Rundkurs-Suche den flexiblen Modus, ' +
+    'den der Gratis-Tarif nicht erlaubt. Dort bleibt nur schnellstes Autorouting – BRouter oder ' +
+    'OpenRouteService sind dann die bessere Wahl.',
+};
+
 function updateProviderUi() {
-  const gh = state.settings.provider === 'graphhopper';
-  $('graphhopper-options').hidden = !gh;
-  $('brouter-options').hidden = gh;
-  $('capability-hint').textContent = gh
-    ? 'GraphHopper gewichtet Straßenklassen direkt: "Autobahn meiden" und "Mautstraßen meiden" wirken exakt, und Rundkurse sucht der Dienst selbst – im Gebirge deutlich zuverlässiger.'
-    : 'BRouter kennt nur feste Profile: "Autobahn meiden" steuert die Profilwahl. "Mautstraßen meiden" hält nur die Wegpunkte fern – zwischen ihnen kann die Route trotzdem über Maut führen.';
+  const p = state.settings.provider;
+  $('brouter-options').hidden = p !== 'brouter';
+  $('ors-options').hidden = p !== 'openrouteservice';
+  $('graphhopper-options').hidden = p !== 'graphhopper';
+  $('capability-hint').textContent = PROVIDER_HINTS[p] ?? '';
 }
 
 const persist = () => saveSettings(state.settings);
@@ -431,9 +448,10 @@ async function run() {
     }
   }
 
+  const router = createRouter(state.settings);
   try {
     const { candidates, best, warnings } = await generateRoutes(request, {
-      router: createRouter(state.settings),
+      router,
       signal,
       snap,
       onProgress: ({ message }) => setStatus(`${message} …`),
@@ -449,13 +467,13 @@ async function run() {
         ? `${candidates.length} von ${gewuenscht} Varianten sind durchgekommen – die beste steht unten.`
         : `${candidates.length} Variante${candidates.length === 1 ? '' : 'n'} durchgerechnet – die beste steht unten.`,
     );
-    const alle = [...netzWarnungen, ...warnings, ...mautHinweis(best)];
+    const alle = [...netzWarnungen, ...warnings, ...(router.notices ?? []), ...mautHinweis(best)];
     if (alle.length) showAlert(alle.join(' '), 'warn');
     nameRoute(best);
   } catch (err) {
     if (err.name === 'AbortError') return;
     setStatus('');
-    showAlert(err.message ?? 'Unbekannter Fehler bei der Routensuche.');
+    showAlert([err.message ?? 'Unbekannter Fehler bei der Routensuche.', ...(router.notices ?? [])].join(' '));
   } finally {
     setBusy(false);
   }
