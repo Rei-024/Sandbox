@@ -7,6 +7,7 @@ import {
   networkCacheKey,
   parseOverpassRoads,
   snapWaypoints,
+  tollNogos,
   tollRoadsNear,
 } from '../assets/js/roads.js';
 import { destination, distance } from '../assets/js/geo.js';
@@ -161,4 +162,21 @@ test('tollRoadsNear meldet nur, was wirklich am Weg liegt', () => {
   const treffer = tollRoadsNear(route, roads);
   assert.deepEqual(treffer, ['Passstraße']);
   assert.deepEqual(tollRoadsNear(route, []), []);
+});
+
+test('tollNogos liefert BRouter-Sperrzonen, die naechsten zuerst', () => {
+  const roads = [
+    { point: destination(START, 0, 30000), toll: true, highway: 'tertiary' },
+    { point: destination(START, 0, 5000), toll: true, highway: 'tertiary' },
+    { point: destination(START, 0, 8000), toll: false, highway: 'tertiary' },
+  ];
+  const zonen = tollNogos(roads, { near: START, radiusM: 250 });
+  assert.equal(zonen.length, 2, 'nur Mautstraßen');
+  assert.equal(zonen[0][2], 250);
+  assert.ok(
+    distance(START, [zonen[0][0], zonen[0][1]]) < distance(START, [zonen[1][0], zonen[1][1]]),
+    'die naheliegenden zuerst',
+  );
+  assert.equal(tollNogos(roads, { near: START, limit: 1 }).length, 1, 'Deckel greift');
+  assert.deepEqual(tollNogos([{ point: START, toll: false }]), []);
 });

@@ -84,7 +84,7 @@ test('GraphHopper ohne Key erklaert sich, bevor er etwas schickt', async () => {
 test('Die Dienste sagen ehrlich, was sie koennen', () => {
   const br = new BRouterAdapter().capabilities;
   const gh = new GraphHopperAdapter({ apiKey: 'x' }).capabilities;
-  assert.equal(br.avoidToll, 'waypoints-only');
+  assert.equal(br.avoidToll, 'nogo');
   assert.equal(br.roundTrip, false);
   assert.equal(gh.avoidToll, 'exact');
   assert.equal(gh.roundTrip, true);
@@ -238,4 +238,75 @@ test('createRouter liefert den eingestellten Dienst', async () => {
   assert.equal(createRouter({ provider: 'brouter' }).provider, 'brouter');
   assert.equal(createRouter({ provider: 'openrouteservice', orsKey: 'k' }).provider, 'openrouteservice');
   assert.equal(createRouter({ provider: 'graphhopper', graphhopperKey: 'k' }).provider, 'graphhopper');
+});
+
+/* ------------------------------------------ Sperrzonen statt zweitem Dienst */
+
+const BR_ANTWORT = {
+  features: [
+    {
+      properties: { 'track-length': '84000', 'total-time': '6000', 'filtered ascend': '900' },
+      geometry: { type: 'LineString', coordinates: [[13.6, 47.6, 500], [13.7, 47.7, 700]] },
+    },
+  ],
+};
+
+test('BRouter bekommt Mautstrassen als Sperrzonen in die URL', async () => {
+  const original = globalThis.fetch;
+  const urls = [];
+  globalThis.fetch = async (url) => {
+    urls.push(String(url));
+    return { ok: true, status: 200, text: async () => JSON.stringify(BR_ANTWORT) };
+  };
+  try {
+    await new BRouterAdapter().route([START, START], {
+      nogos: [
+        [13.5, 47.5, 250],
+        [13.4, 47.4, 250],
+      ],
+    });
+    const nogos = decodeURIComponent(new URL(urls[0]).searchParams.get('nogos'));
+    assert.equal(nogos, '13.5,47.5,250|13.4,47.4,250');
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
+test('Ohne Sperrzonen bleibt die URL unveraendert', async () => {
+  const original = globalThis.fetch;
+  let url = '';
+  globalThis.fetch = async (u) => {
+    url = String(u);
+    return { ok: true, status: 200, text: async () => JSON.stringify(BR_ANTWORT) };
+  };
+  try {
+    await new BRouterAdapter().route([START, START], {});
+    assert.equal(new URL(url).searchParams.get('nogos'), null);
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
+test('Gibt es ohne Maut keinen Weg, faellt die Sperre – mit Hinweis', async () => {
+  const original = globalThis.fetch;
+  const urls = [];
+  globalThis.fetch = async (url) => {
+    urls.push(String(url));
+    if (urls.length === 1) {
+      return { ok: false, status: 400, text: async () => 'target island detected for section 1' };
+    }
+    return { ok: true, status: 200, text: async () => JSON.stringify(BR_ANTWORT) };
+  };
+  try {
+    const br = new BRouterAdapter();
+    const route = await br.route([START, START], { nogos: [[13.5, 47.5, 250]] });
+
+    assert.equal(urls.length, 2, 'zweiter Anlauf ohne Sperre');
+    assert.ok(urls[0].includes('nogos'));
+    assert.ok(!urls[1].includes('nogos'));
+    assert.equal(route.distanceM, 84000, 'lieber eine Route mit Maut als gar keine');
+    assert.ok(br.notices[0].includes('Mautstraßen'), 'aber der Fahrer erfährt es');
+  } finally {
+    globalThis.fetch = original;
+  }
 });

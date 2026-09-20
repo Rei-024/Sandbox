@@ -109,6 +109,20 @@ Rundkurs-Suche mit – die arbeitet direkt auf dem Straßengraphen, statt Wegpun
 zu würfeln, und umgeht damit Sackgassen und Stichstraßen von vornherein. Im
 Gebirge ist das der spürbar bessere Weg.
 
+### Maut umfahren ohne zweiten Dienst
+
+Zwei Routing-Dienste hintereinanderzuschalten (einer findet den Korridor, der
+andere verfeinert ihn) klingt verlockend, bringt aber wenig: Je enger man den
+zweiten führt, desto weniger kann er beitragen – und je lockerer, desto eher
+landet er wieder auf der Mautstraße. Dazu doppelte Anfragen und doppelte
+Latenz.
+
+Die Arbeitsteilung liegt woanders: **Overpass weiß, wo die Mautstraßen sind,
+BRouter weiß, wie man einen Ort umfährt.** Also werden die bekannten
+Mautstraßen als Sperrzonen (`nogos`) an BRouter übergeben – das kostet keine
+einzige zusätzliche Anfrage und keinen Key. Gibt es ohne Maut keinen Weg,
+fällt die Sperre und die App sagt es, statt gar keine Route zu liefern.
+
 **OpenRouteService** – kostenloser Key von
 [openrouteservice.org](https://openrouteservice.org/). Autobahn, Maut und
 Fähren werden über `avoid_features` exakt gemieden, und zwar **schon im
@@ -120,7 +134,7 @@ Was welcher Dienst kann:
 |---|---|---|---|
 | API-Key nötig | nein | ja (kostenlos) | ja |
 | Autobahn meiden | über die Profilwahl | **exakt** | nein |
-| Mautstraßen meiden | nur die Wegpunkte | **exakt** | nein |
+| Mautstraßen meiden | **Sperrzonen** | **exakt** | nein |
 | Schotter meiden | über die Profilwahl | nein | nein |
 | Rundkurs-Suche | eigene Wegpunkte | Versuch, sonst Wegpunkte | nein |
 | Punkte je Anfrage | 30 | 25 | 5 |

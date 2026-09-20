@@ -173,6 +173,25 @@ export function tollRoadsNear(coords, roads, { thresholdM = 250, sampleM = 100 }
   return [...treffer];
 }
 
+/**
+ * Mautstrassen als Sperrzonen, wie BRouter sie versteht: [lon, lat, radius].
+ *
+ * Overpass weiss, *wo* die Mautstrassen liegen; BRouter weiss, wie man einen
+ * Ort umfaehrt. Das zusammenzubringen ist billiger als ein zweiter
+ * Routing-Dienst -- es kostet keine einzige zusaetzliche Anfrage.
+ *
+ * Der Radius bleibt klein: gesperrt wird ein Stueck der Strasse, nicht die
+ * halbe Landschaft. Und die Zahl ist gedeckelt, damit die URL nicht platzt
+ * und nicht versehentlich ein ganzes Tal zugemauert wird.
+ */
+export function tollNogos(roads, { radiusM = 250, limit = 25, near = null } = {}) {
+  let maut = roads.filter((r) => r.toll);
+  if (near) {
+    maut = maut.sort((a, b) => distance(near, a.point) - distance(near, b.point));
+  }
+  return maut.slice(0, limit).map((r) => [r.point[0], r.point[1], radiusM]);
+}
+
 /** Schluessel fuer den Zwischenspeicher: grob gerundet, damit er auch greift. */
 export const networkCacheKey = (center, radiusM) =>
   `${center[1].toFixed(2)},${center[0].toFixed(2)},${Math.round(radiusM / 2000)}`;

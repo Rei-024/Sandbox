@@ -119,17 +119,19 @@ export class BRouterAdapter {
   constructor({ baseUrl = 'https://brouter.de/brouter', profile = 'auto' } = {}) {
     this.baseUrl = baseUrl.replace(/\/+$/, '');
     this.profile = profile;
+    this.notices = [];
     this.provider = 'brouter';
   }
 
   get capabilities() {
     // BRouter nimmt ueber die URL nur einen Profilnamen entgegen -- die
     // Strassenwahl laesst sich also nur ueber das Profil steuern, nicht
-    // punktgenau pro Anfrage.
+    // punktgenau pro Anfrage. Sperrzonen (nogos) gehen dagegen mit, und
+    // damit laesst sich Maut gezielt umfahren -- ohne zweiten Dienst.
     return {
       avoidMotorway: 'profile',
       avoidUnpaved: 'profile',
-      avoidToll: 'waypoints-only',
+      avoidToll: 'nogo',
       roundTrip: false,
       needsKey: false,
       maxPoints: 30,
@@ -141,27 +143,42 @@ export class BRouterAdapter {
     return curviness >= 3 ? 'car-eco' : 'car-fast';
   }
 
-  async route(points, { curviness = 3, signal } = {}) {
+  async route(points, { curviness = 3, nogos = [], signal } = {}) {
     const profile = this.resolveProfile(curviness);
     try {
-      return await this.#request(points, profile, signal);
+      return await this.#request(points, profile, signal, nogos);
     } catch (err) {
       if (err.name === 'AbortError') throw err;
+
+      // Mit gesperrten Mautstrassen gibt es hier keinen Weg? Dann lieber eine
+      // Route mit Maut als gar keine -- aber der Fahrer erfaehrt es.
+      if (nogos.length && err.kind === 'unreachable') {
+        this.notices = [
+          'Ohne Mautstraßen war hier keine Route möglich – die Sperre wurde wieder aufgehoben.',
+        ];
+        return this.#request(points, profile, signal, []);
+      }
       if (profile !== BROUTER_FALLBACK && err.kind === 'profile') {
         // Unbekanntes Profil auf dem Server? Dann lieber mit dem Standard
         // weiterfahren als die ganze Generierung abzubrechen. Bei allen anderen
         // Fehlern waere ein zweiter Versuch nur eine verschwendete Anfrage.
-        return this.#request(points, BROUTER_FALLBACK, signal);
+        return this.#request(points, BROUTER_FALLBACK, signal, nogos);
       }
       throw err;
     }
   }
 
-  async #request(points, profile, signal) {
+  async #request(points, profile, signal, nogos = []) {
     const lonlats = points.map((p) => `${round6(p[0])},${round6(p[1])}`).join('|');
-    const url =
+    let url =
       `${this.baseUrl}?lonlats=${encodeURIComponent(lonlats)}` +
       `&profile=${encodeURIComponent(profile)}&alternativeidx=0&format=geojson`;
+    if (nogos.length) {
+      const zonen = nogos
+        .map(([lon, lat, radius]) => `${round6(lon)},${round6(lat)},${Math.round(radius)}`)
+        .join('|');
+      url += `&nogos=${encodeURIComponent(zonen)}`;
+    }
 
     let res;
     try {

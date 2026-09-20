@@ -302,6 +302,7 @@ export async function generateRoutes(
     avoidMotorway = true,
     avoidUnpaved = true,
     avoidToll = true,
+    nogos = [],
     seed = Math.floor(Math.random() * 1e9),
   } = request;
 
@@ -316,7 +317,14 @@ export async function generateRoutes(
     if (signal?.aborted) throw new DOMException('Abgebrochen', 'AbortError');
     if (requestCount > 0 && requestGapMs > 0) await sleep(requestGapMs);
     requestCount++;
-    return router.route(points, { curviness, avoidMotorway, avoidUnpaved, avoidToll, signal });
+    return router.route(points, {
+      curviness,
+      avoidMotorway,
+      avoidUnpaved,
+      avoidToll,
+      nogos,
+      signal,
+    });
   };
 
   // Manche Dienste koennen Rundkurse selbst suchen (GraphHopper). Das umgeht
@@ -335,6 +343,7 @@ export async function generateRoutes(
       avoidMotorway,
       avoidUnpaved,
       avoidToll,
+      nogos,
       signal,
     });
   };

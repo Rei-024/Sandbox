@@ -8,7 +8,13 @@
 
 import { clamp, cumulativeDistance, overlapPercent } from './geo.js';
 import { generateRoutes, targetDistanceM } from './generator.js';
-import { fetchRoadNetwork, networkCacheKey, snapWaypoints, tollRoadsNear } from './roads.js';
+import {
+  fetchRoadNetwork,
+  networkCacheKey,
+  snapWaypoints,
+  tollNogos,
+  tollRoadsNear,
+} from './roads.js';
 import { BROUTER_PROFILES, createRouter, geocode, reverseGeocode } from './routers.js';
 import { MapView } from './mapview.js';
 import { ElevationChart } from './elevation.js';
@@ -230,7 +236,8 @@ function setMode(value) {
 const PROVIDER_HINTS = {
   brouter:
     'BRouter kennt nur feste Profile: "Autobahn meiden" steuert die Profilwahl. ' +
-    '"Mautstraßen meiden" hält nur die Wegpunkte fern – zwischen ihnen kann die Route trotzdem über Maut führen.',
+    'Mautstraßen werden dagegen als Sperrzonen umfahren – dafür braucht es die ' +
+    'Straßendaten oben, und wo es ohne Maut keinen Weg gibt, fällt die Sperre mit Hinweis weg.',
   openrouteservice:
     'OpenRouteService meidet Autobahn, Maut und Fähren exakt, und das schon im kostenlosen Tarif. ' +
     'Belagsfilter (Schotter) kennt es fürs Auto nicht.',
@@ -425,6 +432,7 @@ async function run() {
     avoidMotorway: state.settings.avoidMotorway,
     avoidUnpaved: state.settings.avoidUnpaved,
     avoidToll: state.settings.avoidToll,
+    nogos: [],
     seed: state.seed,
   };
 
@@ -434,6 +442,12 @@ async function run() {
     try {
       const roads = await loadRoadNetwork(request, signal);
       state.roads = roads;
+      // Overpass weiß, wo die Mautstraßen sind; BRouter weiß, wie man einen
+      // Ort umfährt. Zusammen ergibt das echtes Maut-Meiden ohne zweiten
+      // Dienst und ohne eine einzige zusätzliche Anfrage.
+      if (request.avoidToll) {
+        request.nogos = tollNogos(roads, { near: request.start });
+      }
       snap = (waypoints) =>
         snapWaypoints(waypoints, roads, {
           curviness: request.curviness,
@@ -490,9 +504,7 @@ function mautHinweis(candidate) {
   if (!namen.length) return [];
   return [
     `Die Route führt möglicherweise über eine Mautstraße (${namen.slice(0, 3).join(', ')}). ` +
-      (state.settings.provider === 'brouter'
-        ? 'BRouter kann Maut nicht ausschließen – die App hält nur die Wegpunkte davon fern.'
-        : ''),
+      'Die Sperrzonen greifen nur dort, wo die Straßendaten die Maut kennen.',
   ];
 }
 
