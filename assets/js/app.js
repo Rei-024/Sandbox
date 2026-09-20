@@ -124,11 +124,14 @@ function wireEvents() {
     state.settings.brouterProfile = e.target.value;
     persist();
   });
-  $('brouter-url').addEventListener('change', (e) => {
+  // 'input' statt 'change': 'change' feuert erst beim Verlassen des Feldes.
+  // Auf dem Handy heisst das: Key einfuegen, Tastatur schliessen, generieren --
+  // und der Key war nie gespeichert.
+  $('brouter-url').addEventListener('input', (e) => {
     state.settings.brouterUrl = e.target.value.trim();
     persist();
   });
-  $('graphhopper-key').addEventListener('change', (e) => {
+  $('graphhopper-key').addEventListener('input', (e) => {
     state.settings.graphhopperKey = e.target.value.trim();
     persist();
   });

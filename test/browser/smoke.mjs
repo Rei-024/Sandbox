@@ -289,6 +289,13 @@ try {
   console.log('\n# Fehlerfall');
   await page.locator('#advanced').evaluate((el) => el.setAttribute('open', ''));
   await page.selectOption('#provider', 'graphhopper');
+  check(await page.locator('#graphhopper-key').isVisible(), 'Key-Feld erscheint beim Umschalten');
+  await page.fill('#graphhopper-key', 'probe-key-123');
+  const gemerkt = await page.evaluate(
+    () => JSON.parse(localStorage.getItem('kurvenjagd.settings.v1')).graphhopperKey,
+  );
+  check(gemerkt === 'probe-key-123', `Key wird sofort gespeichert (${gemerkt})`);
+  await page.fill('#graphhopper-key', '');
   await page.click('#generate-btn');
   await page.locator('#alert').waitFor({ state: 'visible', timeout: 15000 });
   const alertText = await page.locator('#alert').textContent();
