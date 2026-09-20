@@ -17,13 +17,65 @@
 const DEFAULT_TIMEOUT_MS = 25000;
 
 export class RoutingError extends Error {
-  constructor(message, { provider, status, retryable = false } = {}) {
+  /**
+   * @param {string} message  Klartext fuer die Oberflaeche
+   * @param {object} opts
+   * @param {'unreachable'|'no-data'|'busy'|'profile'|'other'} [opts.kind]
+   * @param {number|null} [opts.section]  betroffener Streckenabschnitt, falls bekannt
+   */
+  constructor(message, { provider, status, retryable = false, kind = 'other', section = null } = {}) {
     super(message);
     this.name = 'RoutingError';
     this.provider = provider;
     this.status = status;
     this.retryable = retryable;
+    this.kind = kind;
+    this.section = section;
   }
+}
+
+/**
+ * BRouter meldet fachliche Probleme als Klartext -- teils mit HTTP 400, teils
+ * mit Status 200. Die Faelle, die sich beheben lassen, erkennen wir und geben
+ * sie strukturiert weiter, statt dem Nutzer Servertext hinzuwerfen.
+ */
+export function classifyBRouterMessage(text) {
+  const t = String(text ?? '');
+
+  const island = t.match(/island detected for section\s+(\d+)/i);
+  if (island) {
+    return {
+      kind: 'unreachable',
+      section: Number(island[1]),
+      message:
+        'Ein Wegpunkt ist auf einem abgeschnittenen Stück Straßennetz gelandet (Waldweg, Insel, Sackgasse).',
+    };
+  }
+  if (/position not mapped in existing datafile|datafile.*not found/i.test(t)) {
+    return {
+      kind: 'no-data',
+      section: null,
+      message: 'Für diese Gegend hat der BRouter-Server keine Kartendaten.',
+    };
+  }
+  if (/no track found|not.*routable|unreachable|no route/i.test(t)) {
+    return {
+      kind: 'unreachable',
+      section: null,
+      message: 'Zwischen zwei Wegpunkten gibt es keine befahrbare Verbindung.',
+    };
+  }
+  if (/watchdog|too many requests|server.*busy|timeout/i.test(t)) {
+    return {
+      kind: 'busy',
+      section: null,
+      message: 'Der öffentliche BRouter-Server ist gerade ausgelastet – gleich nochmal probieren.',
+    };
+  }
+  if (/profile/i.test(t) && /unknown|not found|invalid/i.test(t)) {
+    return { kind: 'profile', section: null, message: `BRouter kennt dieses Profil nicht: ${t}` };
+  }
+  return { kind: 'other', section: null, message: `BRouter: ${t}` };
 }
 
 async function fetchWithTimeout(url, options = {}, timeoutMs = DEFAULT_TIMEOUT_MS) {
@@ -84,9 +136,10 @@ export class BRouterAdapter {
       return await this.#request(points, profile, signal);
     } catch (err) {
       if (err.name === 'AbortError') throw err;
-      if (profile !== BROUTER_FALLBACK && err.retryable !== false) {
+      if (profile !== BROUTER_FALLBACK && err.kind === 'profile') {
         // Unbekanntes Profil auf dem Server? Dann lieber mit dem Standard
-        // weiterfahren als die ganze Generierung abzubrechen.
+        // weiterfahren als die ganze Generierung abzubrechen. Bei allen anderen
+        // Fehlern waere ein zweiter Versuch nur eine verschwendete Anfrage.
         return this.#request(points, BROUTER_FALLBACK, signal);
       }
       throw err;
@@ -105,31 +158,44 @@ export class BRouterAdapter {
     } catch (err) {
       if (err.name === 'AbortError') throw err;
       throw new RoutingError(
-        'BRouter ist nicht erreichbar. Internetverbindung pruefen – oder in den Einstellungen einen eigenen BRouter-Server eintragen.',
+        'BRouter ist nicht erreichbar. Internetverbindung prüfen – oder in den Einstellungen einen eigenen BRouter-Server eintragen.',
         { provider: 'brouter', retryable: false },
       );
     }
 
     const body = await res.text();
     if (!res.ok) {
-      throw new RoutingError(
-        `BRouter antwortet mit HTTP ${res.status}: ${trim(body)}`,
-        { provider: 'brouter', status: res.status, retryable: res.status >= 500 },
-      );
+      const info = classifyBRouterMessage(trim(body));
+      throw new RoutingError(info.message, {
+        provider: 'brouter',
+        status: res.status,
+        retryable: info.kind === 'busy' || res.status >= 500,
+        kind: info.kind,
+        section: info.section,
+      });
     }
 
     let json;
     try {
       json = JSON.parse(body);
     } catch {
-      // BRouter meldet fachliche Fehler als Klartext mit Status 200.
-      throw new RoutingError(`BRouter: ${trim(body)}`, { provider: 'brouter' });
+      // BRouter meldet fachliche Fehler auch mal als Klartext mit Status 200.
+      const info = classifyBRouterMessage(trim(body));
+      throw new RoutingError(info.message, {
+        provider: 'brouter',
+        kind: info.kind,
+        section: info.section,
+        retryable: info.kind === 'busy',
+      });
     }
 
     const feature = json?.features?.[0];
     const coords = feature?.geometry?.coordinates;
     if (!Array.isArray(coords) || coords.length < 2) {
-      throw new RoutingError('BRouter hat keine Route gefunden.', { provider: 'brouter' });
+      throw new RoutingError('BRouter hat keine Route gefunden.', {
+        provider: 'brouter',
+        kind: 'unreachable',
+      });
     }
 
     const props = feature.properties ?? {};
@@ -162,7 +228,7 @@ export class GraphHopperAdapter {
   async route(points, { curviness = 3, avoidMotorway = true, avoidUnpaved = true, signal } = {}) {
     if (!this.apiKey) {
       throw new RoutingError(
-        'Fuer GraphHopper fehlt der API-Key. Kostenlos auf graphhopper.com anlegen und in den Einstellungen eintragen.',
+        'Für GraphHopper fehlt der API-Key. Kostenlos auf graphhopper.com anlegen und in den Einstellungen eintragen.',
         { provider: 'graphhopper', retryable: false },
       );
     }
@@ -200,11 +266,19 @@ export class GraphHopperAdapter {
     const json = await res.json().catch(() => null);
     if (!res.ok) {
       const msg = json?.message ?? `HTTP ${res.status}`;
-      throw new RoutingError(`GraphHopper: ${msg}`, {
-        provider: 'graphhopper',
-        status: res.status,
-        retryable: res.status === 429 || res.status >= 500,
-      });
+      // GraphHopper benennt den unerreichbaren Punkt im hints-Block.
+      const pointIndex = json?.hints?.find((h) => h.point_index != null)?.point_index;
+      const unreachable = /connection between locations not found|cannot find point/i.test(msg);
+      throw new RoutingError(
+        unreachable ? 'Zwischen zwei Wegpunkten gibt es keine befahrbare Verbindung.' : `GraphHopper: ${msg}`,
+        {
+          provider: 'graphhopper',
+          status: res.status,
+          retryable: res.status === 429 || res.status >= 500,
+          kind: unreachable ? 'unreachable' : 'other',
+          section: pointIndex != null ? pointIndex + 1 : null,
+        },
+      );
     }
 
     const path = json?.paths?.[0];
@@ -212,6 +286,7 @@ export class GraphHopperAdapter {
     if (!Array.isArray(coords) || coords.length < 2) {
       throw new RoutingError('GraphHopper hat keine Route gefunden.', {
         provider: 'graphhopper',
+        kind: 'unreachable',
       });
     }
 

@@ -31,6 +31,8 @@ import {
 const MAX_ITERATIONS = 3; // Routing-Anfragen je Variante
 const TIME_TOLERANCE = 0.1; // 10 % Abweichung sind gut genug
 const REQUEST_GAP_MS = 350; // schont die oeffentlichen Server
+const MAX_REPAIRS = 9; // Zusatzanfragen fuer unerreichbare Wegpunkte, insgesamt
+const MAX_REPAIRS_PER_CALL = 3; // damit ein zaeher Fall nicht alle Varianten auffrisst
 
 /** Kleiner deterministischer Zufallsgenerator, damit "neu wuerfeln" reproduzierbar ist. */
 export function mulberry32(seed) {
@@ -120,6 +122,74 @@ function detourWaypoints(start, end, amplitudeM, curviness, rng) {
   return points;
 }
 
+/**
+ * Wegpunkte verschieben, nachdem der Router einen davon nicht erreichen konnte.
+ *
+ * Gezogen wird Richtung Start: dort steht der Fahrer, dort ist das Netz also
+ * nachweislich befahrbar -- das ist ein deutlich besserer Tipp als eine
+ * zufaellige Richtung, die den Punkt genauso gut tiefer in den Wald setzt.
+ * Etwas Streuung kommt dazu, damit zwei Versuche nicht dieselbe Stelle treffen.
+ *
+ * Der Router nennt den betroffenen Abschnitt, aber ob er dabei ab null oder ab
+ * eins zaehlt, ist nicht verlaesslich -- deshalb wandern der Verdaechtige und
+ * seine beiden Nachbarn. Alle uebrigen bleiben liegen: wer schon erreichbar
+ * war, soll nicht versehentlich auf die naechste Insel geschoben werden.
+ *
+ * Dass die Route dabei anders wird, ist kein Verlust: sie war ohnehin gewuerfelt.
+ */
+export function nudgeWaypoints(waypoints, section, attempt, rng, anchor) {
+  const suspect = section == null ? -1 : clamp(section - 1, 0, waypoints.length - 1);
+  return waypoints.map((wp, i) => {
+    const affected = suspect < 0 || Math.abs(i - suspect) <= 1;
+    if (!affected) return wp;
+    const pull = 0.25 + 0.2 * attempt + 0.15 * rng();
+    const inward = destination(wp, bearingBetween(wp, anchor), distance(wp, anchor) * pull);
+    return destination(inward, rng() * 360, 400 + 600 * rng());
+  });
+}
+
+/** Letzter Ausweg: den verdaechtigen Wegpunkt ganz weglassen. */
+export function dropWaypoint(waypoints, section) {
+  if (waypoints.length <= 1) return null;
+  const idx =
+    section == null
+      ? Math.floor(waypoints.length / 2)
+      : clamp(section - 1, 0, waypoints.length - 1);
+  return waypoints.filter((_, i) => i !== idx);
+}
+
+/**
+ * Routet und repariert dabei Wegpunkte, die der Router nicht erreicht.
+ * Zweimal verschieben, danach weglassen -- alles aus einem gemeinsamen
+ * Anfragebudget, damit ein zaeher Fall nicht den oeffentlichen Server flutet.
+ */
+async function routeWithRepair({ waypoints, assemble, anchor, call, rng, budget }) {
+  let current = waypoints.slice();
+  let attempt = 0;
+
+  for (;;) {
+    try {
+      return { route: await call(assemble(current)), waypoints: current };
+    } catch (err) {
+      const fixable = err.name !== 'AbortError' && err.kind === 'unreachable';
+      if (!fixable || budget.left <= 0 || attempt >= MAX_REPAIRS_PER_CALL) throw err;
+      budget.left--;
+      attempt++;
+
+      // Einmal verschieben -- danach lieber weglassen. Weglassen wirkt
+      // zuverlaessig, und bei fuenf bis neun Wegpunkten faellt einer weniger
+      // kaum auf.
+      if (attempt === 1) {
+        current = nudgeWaypoints(current, err.section, attempt, rng, anchor);
+        continue;
+      }
+      const reduced = dropWaypoint(current, err.section);
+      if (!reduced) throw err;
+      current = reduced;
+    }
+  }
+}
+
 function bearingBetween(a, b) {
   // Eigene kleine Variante, um den Import klein zu halten.
   const dLon = ((b[0] - a[0]) * Math.PI) / 180;
@@ -158,6 +228,7 @@ export async function generateRoutes(
   const normalized = { ...request, mode, durationMin, curviness, variants };
   const candidates = [];
   const warnings = [];
+  const budget = { left: MAX_REPAIRS };
   let lastError = null;
   let requestCount = 0;
 
@@ -175,7 +246,7 @@ export async function generateRoutes(
     try {
       const produced =
         mode === 'loop'
-          ? await buildLoop({ start, bearing0, rng, normalized, call, onProgress, v, variants })
+          ? await buildLoop({ start, bearing0, rng, normalized, call, onProgress, v, variants, budget })
           : await buildOneWay({
               start,
               end,
@@ -187,6 +258,7 @@ export async function generateRoutes(
               v,
               variants,
               warnings,
+              budget,
             });
       candidates.push(...produced);
     } catch (err) {
@@ -197,7 +269,7 @@ export async function generateRoutes(
   }
 
   if (!candidates.length) {
-    throw lastError ?? new Error('Es liess sich keine Route erzeugen.');
+    throw explain(lastError);
   }
 
   // Beim Nachjustieren entstehen je Variante mehrere Routen. Alle zu zeigen
@@ -211,6 +283,22 @@ export async function generateRoutes(
   return { candidates: shortlist, best: shortlist[0], attempts: candidates.length, warnings };
 }
 
+/**
+ * Wenn gar nichts durchkam: dem Nutzer sagen, was er tun kann, statt ihm den
+ * Servertext hinzuwerfen. Ein neuer Anlauf wuerfelt andere Wegpunkte und hilft
+ * bei einem Inselproblem meistens schon.
+ */
+function explain(lastError) {
+  if (!lastError) return new Error('Es ließ sich keine Route erzeugen.');
+  if (lastError.kind === 'unreachable') {
+    return new Error(
+      `${lastError.message} Tipp nochmal auf »Strecke generieren« – dann werden andere ` +
+        'Wegpunkte gewürfelt. Hilft das nicht, verschieb die Start-Nadel auf eine größere Straße.',
+    );
+  }
+  return lastError;
+}
+
 /** Aus allen Versuchen je Startwinkel den besten herausziehen. */
 function bestPerVariant(candidates) {
   const byVariant = new Map();
@@ -222,7 +310,7 @@ function bestPerVariant(candidates) {
   return [...byVariant.values()];
 }
 
-async function buildLoop({ start, bearing0, rng, normalized, call, onProgress, v, variants }) {
+async function buildLoop({ start, bearing0, rng, normalized, call, onProgress, v, variants, budget }) {
   const { durationMin, curviness } = normalized;
   const twisty = (curviness - 1) / 4;
   const detour = 1.15 + 0.22 * twisty; // Strassen sind laenger als der Idealkreis
@@ -237,9 +325,15 @@ async function buildLoop({ start, bearing0, rng, normalized, call, onProgress, v
       message: `Variante ${v + 1}/${variants} – Versuch ${iter + 1}`,
     });
 
-    const waypoints = ringWaypoints(start, radius, curviness, bearing0, rng);
-    const route = await call([start, ...waypoints, start]);
-    const candidate = finalize(route, waypoints, normalized, { seedBearing: bearing0 });
+    const { route, waypoints: used } = await routeWithRepair({
+      waypoints: ringWaypoints(start, radius, curviness, bearing0, rng),
+      assemble: (wps) => [start, ...wps, start],
+      anchor: start,
+      call,
+      rng,
+      budget,
+    });
+    const candidate = finalize(route, used, normalized, { seedBearing: bearing0 });
     out.push(candidate);
 
     const ratio = durationMin / Math.max(1, candidate.durationMin);
@@ -260,6 +354,7 @@ async function buildOneWay({
   v,
   variants,
   warnings,
+  budget,
 }) {
   const { durationMin, curviness } = normalized;
   const twisty = (curviness - 1) / 4;
@@ -292,9 +387,15 @@ async function buildOneWay({
         attempt: iter + 1,
         message: `Variante ${v + 1}/${variants} – Umweg justieren`,
       });
-      const waypoints = detourWaypoints(start, end, amplitude, curviness, rng);
-      const route = await call([start, ...waypoints, end]);
-      const candidate = finalize(route, waypoints, normalized, { seedBearing: bearing0 });
+      const { route, waypoints: used } = await routeWithRepair({
+        waypoints: detourWaypoints(start, end, amplitude, curviness, rng),
+        assemble: (wps) => [start, ...wps, end],
+        anchor: start,
+        call,
+        rng,
+        budget,
+      });
+      const candidate = finalize(route, used, normalized, { seedBearing: bearing0 });
       out.push(candidate);
 
       if (Math.abs(candidate.durationMin - durationMin) / durationMin <= TIME_TOLERANCE) break;
@@ -317,9 +418,15 @@ async function buildOneWay({
       message: `Variante ${v + 1}/${variants} – Versuch ${iter + 1}`,
     });
     const target = destination(start, bearing0, Math.max(2000, reach));
-    const waypoints = detourWaypoints(start, target, reach * 0.22 * (1 + twisty), curviness, rng);
-    const route = await call([start, ...waypoints, target]);
-    const candidate = finalize(route, [...waypoints, target], normalized, {
+    const { route, waypoints: used } = await routeWithRepair({
+      waypoints: detourWaypoints(start, target, reach * 0.22 * (1 + twisty), curviness, rng),
+      assemble: (wps) => [start, ...wps, target],
+      anchor: start,
+      call,
+      rng,
+      budget,
+    });
+    const candidate = finalize(route, [...used, target], normalized, {
       seedBearing: bearing0,
     });
     out.push(candidate);

@@ -6,18 +6,39 @@
  * und Hoehe -- genug, um Generator und Kennzahlen ohne Netzzugriff zu pruefen.
  */
 import { destination, distance, lineLength } from '../assets/js/geo.js';
+import { RoutingError, classifyBRouterMessage } from '../assets/js/routers.js';
 
 export class FakeRouter {
-  /** @param {number} wiggle 0 = schnurgerade, 1 = sehr kurvig */
-  constructor({ wiggle = 0.5, stepM = 120 } = {}) {
+  /**
+   * @param {number} wiggle 0 = schnurgerade, 1 = sehr kurvig
+   * @param {Array<{center: [number, number], radiusM: number}>} islands
+   *        Zonen, die der Router nicht erreichen kann -- so verhaelt sich
+   *        BRouter bei Waldwegen und abgeschnittenen Netzstuecken.
+   */
+  constructor({ wiggle = 0.5, stepM = 120, islands = [] } = {}) {
     this.wiggle = wiggle;
     this.stepM = stepM;
+    this.islands = islands;
     this.calls = 0;
+    this.rejections = 0;
     this.provider = 'fake';
   }
 
   async route(points) {
     this.calls++;
+    for (let i = 0; i < points.length; i++) {
+      const island = this.islands.find((is) => distance(points[i], is.center) < is.radiusM);
+      if (island) {
+        this.rejections++;
+        // Denselben Weg nehmen wie der echte Adapter: Servertext -> Klartext.
+        const info = classifyBRouterMessage(`target island detected for section ${i}`);
+        throw new RoutingError(info.message, {
+          provider: 'fake',
+          kind: info.kind,
+          section: info.section,
+        });
+      }
+    }
     const coords = [];
     for (let i = 1; i < points.length; i++) {
       const seg = this.#segment(points[i - 1], points[i]);

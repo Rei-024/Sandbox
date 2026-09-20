@@ -1,6 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { generateRoutes, measure, mulberry32, targetDistanceM } from '../assets/js/generator.js';
+import {
+  dropWaypoint,
+  generateRoutes,
+  measure,
+  mulberry32,
+  nudgeWaypoints,
+  targetDistanceM,
+} from '../assets/js/generator.js';
 import { destination, distance } from '../assets/js/geo.js';
 import { FakeRouter } from './fake-router.mjs';
 
@@ -150,4 +157,83 @@ test('mulberry32 ist deterministisch und liegt in [0,1)', () => {
     assert.equal(v, b());
     assert.ok(v >= 0 && v < 1);
   }
+});
+
+
+/* ------------------------------------------- unerreichbare Wegpunkte */
+
+test('nudgeWaypoints bewegt nur den Verdaechtigen und seine Nachbarn', () => {
+  const rng = mulberry32(4);
+  const wps = [0, 1, 2, 3, 4].map((i) => destination(START, i * 72, 20000));
+  const moved = nudgeWaypoints(wps, 3, 1, rng, START);
+
+  assert.equal(moved.length, wps.length);
+  const shifts = moved.map((p, i) => distance(p, wps[i]));
+  // Abschnitt 3 zeigt auf Wegpunkt 2, mitsamt Nachbarn 1 und 3.
+  assert.ok(Math.min(shifts[1], shifts[2], shifts[3]) > 1000, `${shifts}`);
+  assert.ok(shifts[0] === 0 && shifts[4] === 0, 'unbeteiligte bleiben liegen');
+});
+
+test('nudgeWaypoints zieht Richtung Start', () => {
+  const rng = mulberry32(12);
+  const wps = [destination(START, 90, 20000)];
+  const moved = nudgeWaypoints(wps, null, 1, rng, START);
+  assert.ok(distance(moved[0], START) < distance(wps[0], START), 'naeher am Start als vorher');
+});
+
+test('nudgeWaypoints ohne Abschnittsangabe bewegt alle', () => {
+  const rng = mulberry32(8);
+  const wps = [0, 1, 2].map((i) => destination(START, i * 120, 15000));
+  const moved = nudgeWaypoints(wps, null, 1, rng, START);
+  assert.ok(moved.every((p, i) => distance(p, wps[i]) > 500));
+});
+
+test('dropWaypoint entfernt genau einen und schuetzt den letzten', () => {
+  const wps = [0, 1, 2, 3].map((i) => destination(START, i * 90, 10000));
+  const less = dropWaypoint(wps, 3);
+  assert.equal(less.length, 3);
+  assert.ok(!less.some((p) => p === wps[2]));
+  assert.equal(dropWaypoint([wps[0]], null), null, 'einen einzelnen nicht wegwerfen');
+});
+
+test('Unerreichbarer Wegpunkt wird repariert statt aufzugeben', async () => {
+  // Ein breiter Riegel quer durch das Suchgebiet: die erste Ringform muss
+  // zwangslaeufig hineinfallen.
+  const router = new FakeRouter({
+    wiggle: 0.4,
+    islands: [{ center: destination(START, 45, 11000), radiusM: 5000 }],
+  });
+  const { best, warnings } = await generateRoutes(
+    { start: START, mode: 'loop', durationMin: 120, curviness: 4, variants: 2, seed: 101 },
+    { router, ...fast },
+  );
+
+  assert.ok(router.rejections > 0, 'der Testfall muss den Fehler wirklich ausloesen');
+  assert.ok(best, 'trotzdem kommt eine Route heraus');
+  assert.ok(best.distanceM > 1000);
+  assert.deepEqual(warnings, [], 'und zwar ohne Warnung an den Nutzer');
+});
+
+test('Reparaturbudget begrenzt die Anfragen an den Server', async () => {
+  // Alles ringsum unerreichbar: hier ist nichts zu retten.
+  const router = new FakeRouter({
+    wiggle: 0.4,
+    islands: [{ center: START, radiusM: 400000 }],
+  });
+  await assert.rejects(
+    generateRoutes(
+      { start: START, mode: 'loop', durationMin: 120, curviness: 5, variants: 3, seed: 5 },
+      { router, ...fast },
+    ),
+  );
+  assert.ok(router.calls <= 16, `zu viele Anfragen trotz Budget: ${router.calls}`);
+});
+
+test('Hoffnungsloser Fall erklaert, was der Nutzer tun kann', async () => {
+  const router = new FakeRouter({ islands: [{ center: START, radiusM: 400000 }] });
+  const err = await generateRoutes(
+    { start: START, mode: 'loop', durationMin: 90, curviness: 1, variants: 1, seed: 2 },
+    { router, ...fast },
+  ).catch((e) => e);
+  assert.match(err.message, /Start-Nadel|Strassennetz|Verbindung/i, err.message);
 });
