@@ -394,3 +394,65 @@ test('Snapping haelt die Wegpunkte auf der Strasse', async () => {
   );
   assert.equal(abseits.length, 0, `${abseits.length} Wegpunkte liegen im Gelaende`);
 });
+
+
+/* --------------------------------------- Rundkurs-Algorithmus des Dienstes */
+
+test('Kann der Dienst Rundkurse, werden keine Wegpunkte gewuerfelt', async () => {
+  const router = new FakeRouter({ supportsRoundTrip: true });
+  const { best, candidates } = await generateRoutes(
+    { start: START, mode: 'loop', durationMin: 120, curviness: 3, variants: 2, seed: 5 },
+    { router, ...fast },
+  );
+
+  assert.ok(router.roundTrips > 0, 'der Rundkurs-Algorithmus muss genutzt werden');
+  assert.equal(router.calls, router.roundTrips, 'und zwar ausschließlich');
+  assert.equal(candidates.length, 2);
+  const err = Math.abs(best.durationMin - 120) / 120;
+  assert.ok(err < 0.15, `Fahrzeit daneben: ${best.durationMin.toFixed(0)} min`);
+  assert.ok(best.overlap < 0.05, 'ein echter Kreis fährt nichts doppelt');
+});
+
+test('Streikt der Rundkurs-Algorithmus, uebernehmen die eigenen Wegpunkte', async () => {
+  const router = new FakeRouter({ supportsRoundTrip: true, roundTripFails: true, wiggle: 0.4 });
+  const { best, warnings } = await generateRoutes(
+    { start: START, mode: 'loop', durationMin: 120, curviness: 3, variants: 1, seed: 6 },
+    { router, ...fast },
+  );
+  assert.ok(best, 'es kommt trotzdem eine Route heraus');
+  assert.ok(best.waypoints.length > 0, 'diesmal über eigene Wegpunkte');
+  assert.ok(warnings.some((w) => /Rundkurs-Suche/.test(w)), warnings.join(' | '));
+});
+
+test('Einwegstrecken lassen den Rundkurs-Algorithmus links liegen', async () => {
+  const router = new FakeRouter({ supportsRoundTrip: true, wiggle: 0.4 });
+  await generateRoutes(
+    { start: START, mode: 'oneway', durationMin: 90, curviness: 3, bearing: 0, variants: 1, seed: 8 },
+    { router, ...fast },
+  );
+  assert.equal(router.roundTrips, 0);
+});
+
+test('Stichstrassen werden auch repariert, wenn die Wunschzeit unerreichbar ist', async () => {
+  // Enges Tal: jede erreichbare Runde ist viel laenger als die Wunschzeit.
+  // Frueher lief die Stichstrassen-Reparatur nur bei passender Zeit -- hier
+  // also nie, und genau so kamen Routen mit 93 % Doppeltfahren zustande.
+  const router = new FakeRouter({
+    wiggle: 0.5,
+    deadEnds: [
+      { center: destination(START, 40, 11000), radiusM: 5000 },
+      { center: destination(START, 200, 11000), radiusM: 5000 },
+      { center: destination(START, 300, 11000), radiusM: 5000 },
+    ],
+  });
+  const meldungen = [];
+  await generateRoutes(
+    { start: START, mode: 'loop', durationMin: 120, curviness: 4, variants: 2, seed: 44 },
+    { router, ...fast, onProgress: ({ message }) => meldungen.push(message) },
+  ).catch(() => null);
+
+  assert.ok(
+    meldungen.some((m) => /Stichstrasse/.test(m)),
+    `Reparatur lief nicht an: ${[...new Set(meldungen)].join(' | ')}`,
+  );
+});

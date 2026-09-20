@@ -15,7 +15,7 @@
  * nicht kaputt.
  */
 
-import { distance } from './geo.js';
+import { distance, resample } from './geo.js';
 import { fetchWithTimeout } from './routers.js';
 
 export const OVERPASS_ENDPOINTS = [
@@ -54,7 +54,12 @@ export function parseOverpassRoads(json) {
     const c = el.center ?? (el.lat != null ? { lat: el.lat, lon: el.lon } : null);
     const highway = el.tags?.highway;
     if (!c || !highway || !(highway in CLASS_RANK)) continue;
-    roads.push({ point: [c.lon, c.lat], highway, name: el.tags.name ?? null });
+    roads.push({
+      point: [c.lon, c.lat],
+      highway,
+      name: el.tags.name ?? el.tags.ref ?? null,
+      toll: el.tags.toll === 'yes',
+    });
   }
   return roads;
 }
@@ -82,13 +87,18 @@ export function classPenaltyM(highway, curviness) {
  * die Runde in sich zusammen. Findet sich im Umkreis nichts, bleibt der
  * Wunschpunkt stehen; darum kuemmert sich dann die Reparatur im Generator.
  */
-export function snapWaypoints(waypoints, roads, { curviness = 3, maxSnapM = 6000 } = {}) {
+export function snapWaypoints(
+  waypoints,
+  roads,
+  { curviness = 3, maxSnapM = 6000, avoidToll = true } = {},
+) {
   if (!roads?.length) return waypoints;
   const taken = [];
   return waypoints.map((wp) => {
     let best = null;
     let bestCost = Infinity;
     for (const road of roads) {
+      if (avoidToll && road.toll) continue;
       const d = distance(wp, road.point);
       if (d > maxSnapM) continue;
       if (taken.some((t) => distance(t, road.point) < 400)) continue;
@@ -137,6 +147,30 @@ export async function fetchRoadNetwork(
     }
   }
   throw lastError ?? new Error('Straßennetz nicht verfügbar.');
+}
+
+/**
+ * Mautstrassen, an denen die fertige Route entlangfuehrt.
+ *
+ * Wir kennen von jeder Strasse nur einen Mittelpunkt, nicht ihren Verlauf --
+ * das reicht fuer einen Hinweis, nicht fuer eine Gewissheit. Deshalb heisst
+ * es in der Oberflaeche auch "moeglicherweise".
+ *
+ * Die Route wird vorher auf feste Schrittweite gebracht: jeden n-ten Punkt zu
+ * pruefen wuerde je nach Knotendichte ueber eine Mautstrasse hinwegspringen.
+ */
+export function tollRoadsNear(coords, roads, { thresholdM = 250, sampleM = 100 } = {}) {
+  const maut = roads.filter((r) => r.toll);
+  if (!maut.length) return [];
+  const treffer = new Set();
+  for (const p of resample(coords, sampleM)) {
+    for (const road of maut) {
+      if (distance(p, road.point) < thresholdM) {
+        treffer.add(road.name ?? 'unbenannte Mautstraße');
+      }
+    }
+  }
+  return [...treffer];
 }
 
 /** Schluessel fuer den Zwischenspeicher: grob gerundet, damit er auch greift. */

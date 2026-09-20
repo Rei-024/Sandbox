@@ -30,12 +30,14 @@ import {
 
 const MAX_ITERATIONS = 3; // Routing-Anfragen je Variante
 const TIME_TOLERANCE = 0.1; // 10 % Abweichung sind gut genug
-const REQUEST_GAP_MS = 350; // schont die oeffentlichen Server
+const REQUEST_GAP_MS = 250; // schont die oeffentlichen Server
 const MAX_REPAIRS_TOTAL = 12; // Zusatzanfragen fuer unerreichbare Wegpunkte, je Suche
 const MAX_REPAIRS_PER_VARIANT = 4; // damit ein zaeher Fall nicht alle Varianten auffrisst
 const MAX_REPAIRS_PER_CALL = 3;
-const MAX_TRIES_PER_VARIANT = 4; // Routing-Anfragen je Variante, ohne Reparaturen
+const MAX_TRIES_PER_VARIANT = 5; // Routing-Anfragen je Variante, ohne Reparaturen
 const SPUR_LIMIT = 0.12; // ab hier lohnt es, gegen Stichstrassen vorzugehen
+const SPUR_DRINGEND = 0.08; // so weit darueber ist die Runde auch mit perfekter Zeit unbrauchbar
+const FESTGEFAHREN = 0.04; // aendert sich die Laenge kaum noch, bringt Nachskalieren nichts
 const MAX_SPUR_FIXES = 2;
 
 /** Kleiner deterministischer Zufallsgenerator, damit "neu wuerfeln" reproduzierbar ist. */
@@ -274,6 +276,7 @@ export async function generateRoutes(
     variants = 3,
     avoidMotorway = true,
     avoidUnpaved = true,
+    avoidToll = true,
     seed = Math.floor(Math.random() * 1e9),
   } = request;
 
@@ -288,7 +291,25 @@ export async function generateRoutes(
     if (signal?.aborted) throw new DOMException('Abgebrochen', 'AbortError');
     if (requestCount > 0 && requestGapMs > 0) await sleep(requestGapMs);
     requestCount++;
-    return router.route(points, { curviness, avoidMotorway, avoidUnpaved, signal });
+    return router.route(points, { curviness, avoidMotorway, avoidUnpaved, avoidToll, signal });
+  };
+
+  // Manche Dienste koennen Rundkurse selbst suchen (GraphHopper). Das umgeht
+  // unsere gewuerfelten Wegpunkte komplett -- und damit die Sackgassen, an
+  // denen sie im Gebirge scheitern.
+  const kannRundkurs = mode === 'loop' && router.capabilities?.roundTrip && router.roundTrip;
+  const callRoundTrip = async (distanceM, tripSeed) => {
+    if (signal?.aborted) throw new DOMException('Abgebrochen', 'AbortError');
+    if (requestCount > 0 && requestGapMs > 0) await sleep(requestGapMs);
+    requestCount++;
+    return router.roundTrip(start, distanceM, {
+      seed: tripSeed,
+      curviness,
+      avoidMotorway,
+      avoidUnpaved,
+      avoidToll,
+      signal,
+    });
   };
 
   for (let v = 0; v < variants; v++) {
@@ -300,20 +321,41 @@ export async function generateRoutes(
     const granted = budget.left;
 
     try {
+      const waypointLoop = () =>
+        buildLoop({
+          start,
+          bearing0,
+          rng,
+          normalized,
+          call,
+          onProgress,
+          v,
+          variants,
+          budget,
+          snap,
+        });
+
       const produced =
         mode === 'loop'
-          ? await buildLoop({
-              start,
-              bearing0,
-              rng,
-              normalized,
-              call,
-              onProgress,
-              v,
-              variants,
-              budget,
-              snap,
-            })
+          ? kannRundkurs
+            ? await buildNativeLoop({
+                bearing0,
+                normalized,
+                callRoundTrip,
+                onProgress,
+                v,
+                variants,
+                seed: seed + v * 7919,
+              }).catch((err) => {
+                if (err.name === 'AbortError') throw err;
+                // Kann der Dienst es doch nicht, nehmen wir den eigenen Weg.
+                failures.push({
+                  variant: v + 1,
+                  message: `Rundkurs-Suche des Dienstes nicht verfügbar (${err.message}) – mit eigenen Wegpunkten weitergemacht.`,
+                });
+                return waypointLoop();
+              })
+            : await waypointLoop()
           : await buildOneWay({
               start,
               end,
@@ -423,6 +465,7 @@ async function buildLoop({
 
   let waypoints = snap(ringWaypoints(start, radius, curviness, bearing0, rng));
   let spurFixes = 0;
+  let letzteLaenge = null;
   const out = [];
 
   for (let iter = 0; iter < MAX_TRIES_PER_VARIANT; iter++) {
@@ -447,35 +490,90 @@ async function buildLoop({
     out.push(candidate);
 
     const ratio = durationMin / Math.max(1, candidate.durationMin);
-    const timeOk = Math.abs(1 - ratio) <= TIME_TOLERANCE;
-    const spurOk = candidate.overlap <= SPUR_LIMIT;
-    if (timeOk && spurOk) break;
+    const timeErr = Math.abs(1 - ratio);
+    const spurErr = Math.max(0, candidate.overlap - SPUR_LIMIT);
+    if (timeErr <= TIME_TOLERANCE && spurErr === 0) break;
 
-    // Erst die Zeit treffen -- eine Route, die eine Stunde danebenliegt,
-    // muss man nicht auf Stichstrassen abklopfen.
-    if (!timeOk) {
+    // Bringt Nachskalieren nichts mehr? Die Strassen liegen, wo sie liegen --
+    // dann muss sich die Anzahl der Wegpunkte aendern, nicht der Radius.
+    const festgefahren =
+      letzteLaenge != null &&
+      Math.abs(candidate.distanceM - letzteLaenge) / letzteLaenge < FESTGEFAHREN;
+    letzteLaenge = candidate.distanceM;
+
+    const stichstrasseMoeglich = spurFixes < MAX_SPUR_FIXES && spurErr > 0;
+    // Eine Runde, die zu 80 % doppelt gefahren wird, ist auch mit perfekter
+    // Fahrzeit unbrauchbar. Frueher lief diese Reparatur nur, wenn die Zeit
+    // schon stimmte -- im Gebirge stimmt sie nie, also lief sie nie.
+    const zuerstStichstrasse =
+      stichstrasseMoeglich && (spurErr > SPUR_DRINGEND || timeErr <= TIME_TOLERANCE);
+
+    if (zuerstStichstrasse) {
+      const culprit = spurCulprit(waypoints, overlapDetail(route.coords).repeated);
+      if (culprit >= 0) {
+        onProgress({
+          variant: v + 1,
+          variants,
+          attempt: iter + 1,
+          message: `Variante ${v + 1}/${variants} – Stichstrasse umgehen`,
+        });
+        // Erst versetzen, dann streichen.
+        const fixed =
+          spurFixes === 0
+            ? snap(rotateWaypoint(waypoints, culprit, start, rng))
+            : dropWaypoint(waypoints, culprit + 1);
+        if (fixed) {
+          waypoints = fixed;
+          spurFixes++;
+          continue;
+        }
+      }
+      // Kein einzelner Schuldiger: die Gegend gibt keine bessere Runde her.
+      if (timeErr <= TIME_TOLERANCE) break;
+    }
+
+    if (timeErr > TIME_TOLERANCE) {
+      const zuLang = candidate.durationMin > durationMin;
+      if (festgefahren && zuLang && waypoints.length > 3) {
+        const kuerzer = dropWaypoint(waypoints, null);
+        if (kuerzer) {
+          waypoints = kuerzer;
+          continue;
+        }
+      }
       radius *= clamp(ratio, 0.6, 1.7) ** 0.9;
       waypoints = snap(ringWaypoints(start, radius, curviness, bearing0, rng));
       continue;
     }
+    break;
+  }
+  return out;
+}
 
-    if (spurFixes >= MAX_SPUR_FIXES) break;
-    const culprit = spurCulprit(waypoints, overlapDetail(route.coords).repeated);
-    if (culprit < 0) break; // kein einzelner Schuldiger -- die Gegend gibt es nicht her
+/**
+ * Rundkurs vom Dienst selbst suchen lassen, nur die Laenge nachjustieren.
+ * Ohne eigene Wegpunkte gibt es hier weder Inseln noch Stichstrassen zu
+ * reparieren -- das erledigt der Dienst auf dem echten Strassengraphen.
+ */
+async function buildNativeLoop({ bearing0, normalized, callRoundTrip, onProgress, v, variants, seed }) {
+  const { durationMin, curviness } = normalized;
+  let laenge = targetDistanceM(durationMin, curviness);
+  const out = [];
+
+  for (let iter = 0; iter < MAX_TRIES_PER_VARIANT - 1; iter++) {
     onProgress({
       variant: v + 1,
       variants,
       attempt: iter + 1,
-      message: `Variante ${v + 1}/${variants} – Stichstrasse umgehen`,
+      message: `Variante ${v + 1}/${variants} – Rundkurs suchen`,
     });
-    // Erst versetzen, dann streichen.
-    const fixed =
-      spurFixes === 0
-        ? snap(rotateWaypoint(waypoints, culprit, start, rng))
-        : dropWaypoint(waypoints, culprit + 1);
-    if (!fixed) break;
-    waypoints = fixed;
-    spurFixes++;
+    const route = await callRoundTrip(laenge, seed);
+    const candidate = finalize(route, [], normalized, { seedBearing: bearing0 });
+    out.push(candidate);
+
+    const ratio = durationMin / Math.max(1, candidate.durationMin);
+    if (Math.abs(1 - ratio) <= TIME_TOLERANCE) break;
+    laenge *= clamp(ratio, 0.6, 1.7) ** 0.9;
   }
   return out;
 }

@@ -8,7 +8,7 @@
 
 import { clamp, cumulativeDistance, overlapPercent } from './geo.js';
 import { generateRoutes, targetDistanceM } from './generator.js';
-import { fetchRoadNetwork, networkCacheKey, snapWaypoints } from './roads.js';
+import { fetchRoadNetwork, networkCacheKey, snapWaypoints, tollRoadsNear } from './roads.js';
 import { BROUTER_PROFILES, createRouter, geocode, reverseGeocode } from './routers.js';
 import { MapView } from './mapview.js';
 import { ElevationChart } from './elevation.js';
@@ -107,6 +107,10 @@ function wireEvents() {
     state.settings.avoidUnpaved = e.target.checked;
     persist();
   });
+  $('avoid-toll').addEventListener('change', (e) => {
+    state.settings.avoidToll = e.target.checked;
+    persist();
+  });
   $('snap-roads').addEventListener('change', (e) => {
     state.settings.snapToRoads = e.target.checked;
     persist();
@@ -180,6 +184,7 @@ function restoreForm() {
   $('variant-count').value = String(s.variants);
   $('avoid-motorway').checked = s.avoidMotorway;
   $('avoid-unpaved').checked = s.avoidUnpaved;
+  $('avoid-toll').checked = s.avoidToll;
   $('snap-roads').checked = s.snapToRoads;
   $('provider').value = s.provider;
   $('brouter-profile').value = s.brouterProfile;
@@ -219,8 +224,8 @@ function updateProviderUi() {
   $('graphhopper-options').hidden = !gh;
   $('brouter-options').hidden = gh;
   $('capability-hint').textContent = gh
-    ? 'GraphHopper kann Straßenklassen direkt gewichten – "Autobahn meiden" wirkt hier exakt.'
-    : 'BRouter kennt nur feste Profile: "Autobahn meiden" steuert die Profilwahl, ist also eine starke Bevorzugung, keine Garantie.';
+    ? 'GraphHopper gewichtet Straßenklassen direkt: "Autobahn meiden" und "Mautstraßen meiden" wirken exakt, und Rundkurse sucht der Dienst selbst – im Gebirge deutlich zuverlässiger.'
+    : 'BRouter kennt nur feste Profile: "Autobahn meiden" steuert die Profilwahl. "Mautstraßen meiden" hält nur die Wegpunkte fern – zwischen ihnen kann die Route trotzdem über Maut führen.';
 }
 
 const persist = () => saveSettings(state.settings);
@@ -399,6 +404,7 @@ async function run() {
     variants: state.settings.variants,
     avoidMotorway: state.settings.avoidMotorway,
     avoidUnpaved: state.settings.avoidUnpaved,
+    avoidToll: state.settings.avoidToll,
     seed: state.seed,
   };
 
@@ -407,7 +413,12 @@ async function run() {
   if (state.settings.snapToRoads) {
     try {
       const roads = await loadRoadNetwork(request, signal);
-      snap = (waypoints) => snapWaypoints(waypoints, roads, { curviness: request.curviness });
+      state.roads = roads;
+      snap = (waypoints) =>
+        snapWaypoints(waypoints, roads, {
+          curviness: request.curviness,
+          avoidToll: request.avoidToll,
+        });
     } catch (err) {
       if (err.name === 'AbortError') return;
       netzWarnungen.push(
@@ -435,7 +446,7 @@ async function run() {
         ? `${candidates.length} von ${gewuenscht} Varianten sind durchgekommen – die beste steht unten.`
         : `${candidates.length} Variante${candidates.length === 1 ? '' : 'n'} durchgerechnet – die beste steht unten.`,
     );
-    const alle = [...netzWarnungen, ...warnings];
+    const alle = [...netzWarnungen, ...warnings, ...mautHinweis(best)];
     if (alle.length) showAlert(alle.join(' '), 'warn');
     nameRoute(best);
   } catch (err) {
@@ -445,6 +456,23 @@ async function run() {
   } finally {
     setBusy(false);
   }
+}
+
+/**
+ * Wir kennen von jeder Strasse nur einen Mittelpunkt, nicht ihren Verlauf --
+ * daher ein Hinweis, keine Gewissheit. Lieber einmal zu oft gewarnt als den
+ * Fahrer an eine Mautschranke schicken.
+ */
+function mautHinweis(candidate) {
+  if (!state.settings.avoidToll || !state.roads?.length) return [];
+  const namen = tollRoadsNear(candidate.coords, state.roads);
+  if (!namen.length) return [];
+  return [
+    `Die Route führt möglicherweise über eine Mautstraße (${namen.slice(0, 3).join(', ')}). ` +
+      (state.settings.provider === 'brouter'
+        ? 'BRouter kann Maut nicht ausschließen – die App hält nur die Wegpunkte davon fern.'
+        : ''),
+  ];
 }
 
 /**
@@ -623,6 +651,12 @@ function describe(c) {
   ];
   // Die gemessene Kurvigkeit ist das, was die Strassen hergeben -- nicht das,
   // was angeklickt wurde. Auseinanderlaufen darf das, verschwiegen wird es nicht.
+  // Die Wunschzeit deutlich verfehlt? Das gehoert in die erste Zeile, nicht
+  // versteckt in die Kennzahl darunter.
+  const zeitAbweichung = (c.durationMin - state.settings.durationMin) / state.settings.durationMin;
+  if (zeitAbweichung > 0.25) parts.push('kürzer war hier keine Runde zu finden');
+  else if (zeitAbweichung < -0.25) parts.push('länger gab die Gegend nicht her');
+
   const delta = c.curvinessLevel - state.settings.curviness;
   if (delta <= -0.8) parts.push('kurviger gab die Gegend nicht her');
   else if (delta >= 0.8) parts.push('kurviger geworden als bestellt');

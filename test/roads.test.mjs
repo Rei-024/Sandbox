@@ -7,6 +7,7 @@ import {
   networkCacheKey,
   parseOverpassRoads,
   snapWaypoints,
+  tollRoadsNear,
 } from '../assets/js/roads.js';
 import { destination, distance } from '../assets/js/geo.js';
 
@@ -121,4 +122,43 @@ test('networkCacheKey greift bei kleinen Abweichungen noch', () => {
   const b = networkCacheKey(destination(START, 45, 300), 17600);
   assert.equal(a, b, 'ein paar hundert Meter duerfen den Speicher nicht entwerten');
   assert.notEqual(a, networkCacheKey(START, 40000));
+});
+
+test('Mautstrassen werden beim Aufschnappen uebersprungen', () => {
+  const wunsch = destination(START, 90, 12000);
+  const roads = [
+    { point: destination(wunsch, 0, 200), highway: 'tertiary', toll: true, name: 'Postalmstraße' },
+    { point: destination(wunsch, 0, 2000), highway: 'tertiary', toll: false },
+  ];
+  assert.deepEqual(snapWaypoints([wunsch], roads, { avoidToll: true })[0], roads[1].point);
+  assert.deepEqual(snapWaypoints([wunsch], roads, { avoidToll: false })[0], roads[0].point);
+});
+
+test('parseOverpassRoads merkt sich die Maut', () => {
+  const [frei, maut] = parseOverpassRoads({
+    elements: [
+      { type: 'way', center: { lat: 47.6, lon: 13.6 }, tags: { highway: 'tertiary' } },
+      {
+        type: 'way',
+        center: { lat: 47.7, lon: 13.7 },
+        tags: { highway: 'tertiary', toll: 'yes', ref: 'L546' },
+      },
+    ],
+  });
+  assert.equal(frei.toll, false);
+  assert.equal(maut.toll, true);
+  assert.equal(maut.name, 'L546', 'ohne Namen tut es die Nummer');
+});
+
+test('tollRoadsNear meldet nur, was wirklich am Weg liegt', () => {
+  const route = [];
+  for (let i = 0; i <= 60; i++) route.push(destination(START, 90, i * 300));
+  const roads = [
+    { point: destination(START, 90, 9000), highway: 'tertiary', toll: true, name: 'Passstraße' },
+    { point: destination(START, 270, 9000), highway: 'tertiary', toll: true, name: 'Andere Seite' },
+    { point: destination(START, 90, 6000), highway: 'tertiary', toll: false, name: 'Gratis' },
+  ];
+  const treffer = tollRoadsNear(route, roads);
+  assert.deepEqual(treffer, ['Passstraße']);
+  assert.deepEqual(tollRoadsNear(route, []), []);
 });

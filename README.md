@@ -31,6 +31,7 @@ Auf dem Handy: die Seite im Browser öffnen und zum Startbildschirm hinzufügen.
 | **Art** | Runde (endet am Start) oder Einwegstrecke – mit oder ohne festes Ziel, optional in eine Wunschrichtung. |
 | **Ergebnis** | Karte, Steckbrief (Strecke, Fahrzeit, gemessene Kurvigkeit, Höhenmeter), Höhenprofil mit Fadenkreuz, mehrere Varianten zum Durchklicken. |
 | **Mitnehmen** | GPX-Download (Kurviger, Calimoto, OsmAnd, Garmin …) und ein Google-Maps-Link. |
+| **Meiden** | Autobahn, Schotter und Mautstraßen – jeweils abschaltbar. |
 | **Sonst** | Hell/Dunkel, funktioniert am Handy, Einstellungen bleiben gespeichert. |
 
 ## Wie die Routen entstehen
@@ -102,10 +103,24 @@ in den Feineinstellungen eintragen.
 **GraphHopper** – braucht einen kostenlosen API-Key von
 [graphhopper.com](https://www.graphhopper.com/). Dafür kann die App dort
 Straßenklassen direkt gewichten (`custom_model`): Autobahn, Schnellstraße,
-Schotter und Fähren werden wirklich gemieden, kleine Straßen bevorzugt. Wer es
-genau haben will, nimmt diesen Weg.
+Schotter, Fähren **und Mautstraßen** werden wirklich gemieden, kleine Straßen
+bevorzugt. Und GraphHopper bringt mit `algorithm=round_trip` eine eigene
+Rundkurs-Suche mit – die arbeitet direkt auf dem Straßengraphen, statt Wegpunkte
+zu würfeln, und umgeht damit Sackgassen und Stichstraßen von vornherein. Im
+Gebirge ist das der spürbar bessere Weg.
 
-Beide Dienste sind über die Feineinstellungen umschaltbar.
+Was welcher Dienst kann:
+
+| | BRouter | GraphHopper |
+|---|---|---|
+| API-Key nötig | nein | ja (kostenlos) |
+| Autobahn meiden | über die Profilwahl | exakt |
+| Mautstraßen meiden | nur die Wegpunkte | exakt |
+| Rundkurs-Suche | eigene Wegpunkte | eingebaut |
+| Kurvigkeit | Wegpunkte + Straßenklasse | zusätzlich pro Straße gewichtet |
+
+Beide Dienste sind über die Feineinstellungen umschaltbar. Streikt die
+Rundkurs-Suche, fällt die App auf die eigenen Wegpunkte zurück und sagt es.
 
 ## Was die App nicht kann
 
@@ -118,6 +133,10 @@ Ehrlichkeitshalber:
   Ampeln, Ortsdurchfahrten, Baustellen und Pausen.
 - **Sie kennt keine Straßenqualität.** Ob der Belag taugt oder die Straße
   gesperrt ist, weiß nur OpenStreetMap – und das nicht immer.
+- **Der Maut-Hinweis ist ein Hinweis.** Von jeder Straße ist nur ein
+  Mittelpunkt bekannt, nicht ihr Verlauf. Mit BRouter kann die App Maut nur von
+  den Wegpunkten fernhalten, nicht von der Strecke dazwischen – deshalb warnt
+  sie mit „möglicherweise", statt Sicherheit vorzutäuschen.
 - **Öffentliche Server, fair genutzt.** Zwischen den Anfragen liegt eine Pause,
   die Ortssuche hält das Limit von Nominatim ein (eine Anfrage je Sekunde), das
   Straßennetz wird einmal je Suche geholt und zwischengespeichert. Wer die App
@@ -139,7 +158,7 @@ außen gehen nur die Anfragen an den gewählten Routing-Dienst, an Nominatim
 ## Tests
 
 ```bash
-npm test                                            # 54 Unit-Tests, ohne Netz
+npm test                                            # 67 Unit-Tests, ohne Netz
 NODE_PATH=$(npm root -g) node test/browser/smoke.mjs # kompletter Ablauf im Browser
 ```
 

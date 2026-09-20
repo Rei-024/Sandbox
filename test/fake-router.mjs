@@ -29,6 +29,8 @@ export class FakeRouter {
     deadEnds = [],
     corridors = [],
     corridorWidthM = 700,
+    supportsRoundTrip = false,
+    roundTripFails = false,
   } = {}) {
     this.wiggle = wiggle;
     this.stepM = stepM;
@@ -36,9 +38,40 @@ export class FakeRouter {
     this.deadEnds = deadEnds;
     this.corridors = corridors;
     this.corridorWidthM = corridorWidthM;
+    this.supportsRoundTrip = supportsRoundTrip;
+    this.roundTripFails = roundTripFails;
+    this.roundTrips = 0;
     this.calls = 0;
     this.rejections = 0;
     this.provider = 'fake';
+  }
+
+  get capabilities() {
+    return { roundTrip: this.supportsRoundTrip };
+  }
+
+  /** Kreis durch den Start mit ungefaehr der gewuenschten Laenge. */
+  async roundTrip(start, distanceM) {
+    this.calls++;
+    this.roundTrips++;
+    if (this.roundTripFails) throw new Error('round_trip wird von diesem Plan nicht unterstützt');
+
+    const r = distanceM / (2 * Math.PI);
+    const mitte = destination(start, 0, r);
+    const coords = [];
+    for (let i = 0; i <= 120; i++) {
+      const p = destination(mitte, 180 + i * 3, r);
+      coords.push([p[0], p[1], 400 + 150 * Math.sin(i / 8)]);
+    }
+    const laenge = lineLength(coords);
+    return {
+      coords,
+      distanceM: laenge,
+      routerTimeS: laenge / 16,
+      ascentM: Math.round((laenge / 1000) * 10),
+      provider: 'fake',
+      profileUsed: 'fake round_trip',
+    };
   }
 
   async route(points) {

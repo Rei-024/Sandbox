@@ -122,7 +122,13 @@ export class BRouterAdapter {
     // BRouter nimmt ueber die URL nur einen Profilnamen entgegen -- die
     // Strassenwahl laesst sich also nur ueber das Profil steuern, nicht
     // punktgenau pro Anfrage.
-    return { avoidMotorway: 'profile', avoidUnpaved: 'profile', needsKey: false };
+    return {
+      avoidMotorway: 'profile',
+      avoidUnpaved: 'profile',
+      avoidToll: 'waypoints-only',
+      roundTrip: false,
+      needsKey: false,
+    };
   }
 
   resolveProfile(curviness) {
@@ -221,28 +227,69 @@ export class GraphHopperAdapter {
 
   get capabilities() {
     // Hier koennen wir per Custom-Model wirklich pro Anfrage steuern,
-    // welche Strassenklassen bevorzugt oder gemieden werden.
-    return { avoidMotorway: 'exact', avoidUnpaved: 'exact', needsKey: true };
+    // welche Strassenklassen bevorzugt oder gemieden werden -- und
+    // GraphHopper bringt einen eigenen Rundkurs-Algorithmus mit.
+    return {
+      avoidMotorway: 'exact',
+      avoidUnpaved: 'exact',
+      avoidToll: 'exact',
+      roundTrip: true,
+      needsKey: true,
+    };
   }
 
-  async route(points, { curviness = 3, avoidMotorway = true, avoidUnpaved = true, signal } = {}) {
+  /**
+   * Rundkurs am Stueck: GraphHopper sucht selbst eine Schleife der
+   * gewuenschten Laenge. Das umgeht unsere gewuerfelten Wegpunkte komplett --
+   * und damit die Sackgassen und Stichstrassen, an denen sie im Gebirge
+   * scheitern.
+   */
+  async roundTrip(start, distanceM, { seed = 1, curviness = 3, avoidMotorway = true, avoidUnpaved = true, avoidToll = true, signal } = {}) {
+    return this.#post(
+      {
+        points: [[round6(start[0]), round6(start[1])]],
+        profile: 'car',
+        algorithm: 'round_trip',
+        'round_trip.distance': Math.round(distanceM),
+        'round_trip.seed': Math.round(seed),
+        points_encoded: false,
+        elevation: true,
+        instructions: false,
+        'ch.disable': true,
+        custom_model: buildCustomModel(curviness, avoidMotorway, avoidUnpaved, avoidToll),
+      },
+      `car + round_trip (Kurvigkeit ${curviness})`,
+      signal,
+    );
+  }
+
+  async route(
+    points,
+    { curviness = 3, avoidMotorway = true, avoidUnpaved = true, avoidToll = true, signal } = {},
+  ) {
+    return this.#post(
+      {
+        points: points.map((p) => [round6(p[0]), round6(p[1])]),
+        profile: 'car',
+        points_encoded: false,
+        elevation: true,
+        instructions: false,
+        calc_points: true,
+        'ch.disable': true,
+        custom_model: buildCustomModel(curviness, avoidMotorway, avoidUnpaved, avoidToll),
+      },
+      `car + custom_model (Kurvigkeit ${curviness})`,
+      signal,
+    );
+  }
+
+  async #post(payload, profileLabel, signal) {
     if (!this.apiKey) {
       throw new RoutingError(
         'Für GraphHopper fehlt der API-Key. Kostenlos auf graphhopper.com anlegen und in den Einstellungen eintragen.',
         { provider: 'graphhopper', retryable: false },
       );
     }
-
-    const payload = {
-      points: points.map((p) => [round6(p[0]), round6(p[1])]),
-      profile: 'car',
-      points_encoded: false,
-      elevation: true,
-      instructions: false,
-      calc_points: true,
-      'ch.disable': true,
-      custom_model: buildCustomModel(curviness, avoidMotorway, avoidUnpaved),
-    };
 
     let res;
     try {
@@ -296,7 +343,7 @@ export class GraphHopperAdapter {
       routerTimeS: path.time != null ? path.time / 1000 : null,
       ascentM: path.ascend ?? null,
       provider: 'graphhopper',
-      profileUsed: `car + custom_model (Kurvigkeit ${curviness})`,
+      profileUsed: profileLabel,
     };
   }
 }
@@ -307,7 +354,7 @@ export class GraphHopperAdapter {
  * Bewusst nie exakt 0, sonst kann eine Route unloesbar werden, wenn der
  * Startpunkt z.B. an einer Schotterzufahrt liegt.
  */
-function buildCustomModel(curviness, avoidMotorway, avoidUnpaved) {
+function buildCustomModel(curviness, avoidMotorway, avoidUnpaved, avoidToll = true) {
   const twisty = (curviness - 1) / 4; // 0 = egal, 1 = maximal kurvig
   const big = 1 - 0.85 * twisty; // grosse Strassen werden zunehmend unattraktiv
   const small = 1 + 0.8 * twisty; // kleine Strassen zunehmend attraktiv
@@ -329,6 +376,9 @@ function buildCustomModel(curviness, avoidMotorway, avoidUnpaved) {
       if: 'surface == GRAVEL || surface == DIRT || surface == SAND || surface == GROUND',
       multiply_by: 0.05,
     });
+  }
+  if (avoidToll) {
+    priority.push({ if: 'toll == ALL || toll == HGV', multiply_by: 0.02 });
   }
   return { priority };
 }
