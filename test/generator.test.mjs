@@ -438,6 +438,8 @@ test('Stichstrassen werden auch repariert, wenn die Wunschzeit unerreichbar ist'
   // Enges Tal: jede erreichbare Runde ist viel laenger als die Wunschzeit.
   // Frueher lief die Stichstrassen-Reparatur nur bei passender Zeit -- hier
   // also nie, und genau so kamen Routen mit 93 % Doppeltfahren zustande.
+  // Seit dem Herausschneiden ist die gemessene Ueberlappung klein; der
+  // Ausloeser haengt deshalb an der weggeschnittenen Laenge.
   const router = new FakeRouter({
     wiggle: 0.5,
     deadEnds: [

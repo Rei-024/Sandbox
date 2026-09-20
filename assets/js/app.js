@@ -693,6 +693,12 @@ function describe(c) {
   const delta = c.curvinessLevel - state.settings.curviness;
   if (delta <= -0.8) parts.push('kurviger gab die Gegend nicht her');
   else if (delta >= 0.8) parts.push('kurviger geworden als bestellt');
+  if (c.spurCuts > 0) {
+    parts.push(
+      `${c.spurCuts} Sackgassen-${c.spurCuts === 1 ? 'Ast' : 'Äste'} entfernt ` +
+        `(${(c.spursRemovedM / 1000).toFixed(1)} km)`,
+    );
+  }
   if (c.curvature.hairpins > 3) parts.push(`${c.curvature.hairpins} enge Kehren`);
   // Doppelt gefahrene Strecke ist der ehrlichste Qualitaetsindikator einer
   // Runde -- lieber die Zahl zeigen als sie zu umschreiben.

@@ -23,6 +23,9 @@ import {
   destination,
   distance,
   elevationStats,
+  exciseSpurs,
+  isNearPath,
+  lineLength,
   estimateSpeedKmh,
   levelToDegPerKm,
   overlapDetail,
@@ -540,7 +543,16 @@ async function buildLoop({
 
     const ratio = durationMin / Math.max(1, candidate.durationMin);
     const timeErr = Math.abs(1 - ratio);
-    const spurErr = Math.max(0, candidate.overlap - SPUR_LIMIT);
+    // Nach dem Schnitt ist die gemessene Ueberlappung klein -- der Hinweis auf
+    // schlecht gesetzte Wegpunkte steckt jetzt darin, wie viel weggeschnitten
+    // werden musste. Schneiden heilt das Symptom, Wegpunkte versetzen die
+    // Ursache; mehr als ein Zwanzigstel Ausschuss ist es wert, die Ursache
+    // anzugehen.
+    // Gegen die *urspruengliche* Laenge rechnen: distanceM ist schon die
+    // geschnittene, entfernt/verblieben waere ein ganz anderer Massstab.
+    const weg = candidate.spursRemovedM ?? 0;
+    const ausschuss = weg / Math.max(1, candidate.distanceM + weg);
+    const spurErr = Math.max(candidate.overlap - SPUR_LIMIT, ausschuss - 0.05);
     if (timeErr <= TIME_TOLERANCE && spurErr === 0) break;
 
     // Bringt Nachskalieren nichts mehr? Die Strassen liegen, wo sie liegen --
@@ -558,6 +570,8 @@ async function buildLoop({
       stichstrasseMoeglich && (spurErr > SPUR_DRINGEND || timeErr <= TIME_TOLERANCE);
 
     if (zuerstStichstrasse) {
+      // Wichtig: an der *ungeschnittenen* Geometrie suchen -- in der
+      // bereinigten ist der Ast gerade verschwunden, samt seiner Spur.
       const culprit = spurCulprit(waypoints, overlapDetail(route.coords).repeated);
       if (culprit >= 0) {
         onProgress({
@@ -730,17 +744,43 @@ async function buildOneWay({
 let candidateId = 0;
 
 function finalize(route, waypoints, request, extra = {}) {
-  const m = measure(route);
+  // Sackgassen-Aeste sind geschlossene Teilwege -- die lassen sich aus der
+  // fertigen Geometrie herausschneiden, ohne neu zu routen. Was uebrig
+  // bleibt, ist ein Teilstueck derselben Strecke, also weiterhin befahrbar.
+  const geschnitten = exciseSpurs(route.coords);
+  const bereinigt =
+    geschnitten.cuts > 0 ? nachSchnitt(route, geschnitten) : route;
+
+  // Wegpunkte, die nur im abgeschnittenen Ast lagen, gehoeren nicht mehr in
+  // die GPX-Datei -- sonst zeigt sie auf Orte abseits der Route.
+  const verbliebene = waypoints.filter((wp) => isNearPath(wp, bereinigt.coords));
+
+  const m = measure(bereinigt);
   return {
     id: `route-${++candidateId}`,
-    coords: route.coords,
-    distanceM: route.distanceM,
-    routerTimeS: route.routerTimeS,
-    provider: route.provider,
-    profileUsed: route.profileUsed,
-    waypoints,
+    coords: bereinigt.coords,
+    distanceM: bereinigt.distanceM,
+    routerTimeS: bereinigt.routerTimeS,
+    provider: bereinigt.provider,
+    profileUsed: bereinigt.profileUsed,
+    waypoints: verbliebene,
+    spurCuts: geschnitten.cuts,
+    spursRemovedM: geschnitten.removedM,
     ...m,
     ...extra,
     score: scoreCandidate(m, request),
+  };
+}
+
+/** Kennzahlen nach dem Schnitt mitziehen -- sonst passt die Laenge nicht mehr. */
+function nachSchnitt(route, geschnitten) {
+  const laenge = lineLength(geschnitten.coords);
+  const anteil = route.distanceM > 0 ? laenge / route.distanceM : 1;
+  return {
+    ...route,
+    coords: geschnitten.coords,
+    distanceM: laenge,
+    routerTimeS: route.routerTimeS != null ? route.routerTimeS * anteil : null,
+    ascentM: route.ascentM != null ? route.ascentM * anteil : null,
   };
 }

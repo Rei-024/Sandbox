@@ -109,6 +109,19 @@ Rundkurs-Suche mit – die arbeitet direkt auf dem Straßengraphen, statt Wegpun
 zu würfeln, und umgeht damit Sackgassen und Stichstraßen von vornherein. Im
 Gebirge ist das der spürbar bessere Weg.
 
+### Ast oder Schleife?
+
+Beim Schneiden kommt es darauf an, eine Sackgasse von einer kleinen Schleife
+zu unterscheiden – rein und auf anderem Weg heraus ist kein Doppeltfahren und
+soll bleiben. Dafür wird die erste Hälfte des Teilwegs gegen die zweite
+gehalten (`retraceRatio`): bei einem Ast deckt sich alles (1,0), bei einer
+Schleife nichts (0,0). Zwei weitere Grenzen schützen davor, zu viel
+wegzunehmen: ein einzelner Schnitt darf höchstens 60 % der Route treffen, alle
+zusammen höchstens 50 % – beides gegen die *ursprüngliche* Länge gerechnet.
+
+Simulation mit vier Sackgassentälern rund um den Start, 15 Durchläufe:
+Doppeltfahren im Median 0 %, im Maximum 2 % (vorher bis 83 %).
+
 ### Maut umfahren ohne zweiten Dienst
 
 Zwei Routing-Dienste hintereinanderzuschalten (einer findet den Korridor, der
@@ -187,7 +200,7 @@ außen gehen nur die Anfragen an den gewählten Routing-Dienst, an Nominatim
 ## Tests
 
 ```bash
-npm test                                            # 78 Unit-Tests, ohne Netz
+npm test                                            # 92 Unit-Tests, ohne Netz
 NODE_PATH=$(npm root -g) node test/browser/smoke.mjs # kompletter Ablauf im Browser
 ```
 

@@ -249,6 +249,211 @@ export const overlapRatio = (coords, cellM = 60) => overlapDetail(coords, cellM)
  */
 export const overlapPercent = (ratio) => Math.min(100, Math.round(ratio * 200));
 
+/**
+ * Wie viel eines Teilwegs faehrt die Rueckrichtung auf der Hinrichtung?
+ *
+ * Fuer die Frage "ist das ein Ast oder eine Schleife" ist overlapRatio das
+ * falsche Mass: es verlangt einen Mindestabstand zwischen zwei Besuchen
+ * derselben Zelle und unterschaetzt darum kurze Aeste systematisch. Hier
+ * wird stattdessen die erste Haelfte gegen die zweite gehalten -- bei einem
+ * Ast deckt sich fast alles, bei einer Schleife fast nichts.
+ *
+ * 1 = komplett zurueckgefahren, 0 = kein gemeinsamer Meter.
+ */
+export function retraceRatio(coords, toleranceM = 40, sampleM = 30) {
+  const pts = resample(coords, sampleM);
+  if (pts.length < 6) return 0;
+  const mitte = Math.floor(pts.length / 2);
+  const hin = pts.slice(0, mitte);
+  const zurueck = pts.slice(mitte);
+
+  const degLat = toleranceM / 111320;
+  const degLonAt = (lat) => toleranceM / (111320 * Math.max(0.2, Math.cos(toRad(lat))));
+  const zellen = new Map();
+  for (const p of zurueck) {
+    const key = `${Math.round(p[1] / degLat)}:${Math.round(p[0] / degLonAt(p[1]))}`;
+    if (!zellen.has(key)) zellen.set(key, []);
+    zellen.get(key).push(p);
+  }
+
+  let treffer = 0;
+  for (const p of hin) {
+    const row = Math.round(p[1] / degLat);
+    const col = Math.round(p[0] / degLonAt(p[1]));
+    let gefunden = false;
+    // Auch die Nachbarzellen pruefen -- ein Punkt knapp an der Zellgrenze
+    // faende seinen Partner sonst nicht.
+    for (let dr = -1; dr <= 1 && !gefunden; dr++) {
+      for (let dc = -1; dc <= 1 && !gefunden; dc++) {
+        for (const q of zellen.get(`${row + dr}:${col + dc}`) ?? []) {
+          if (distance(p, q) <= toleranceM) {
+            gefunden = true;
+            break;
+          }
+        }
+      }
+    }
+    if (gefunden) treffer++;
+  }
+  return treffer / hin.length;
+}
+
+/**
+ * Sackgassen-Aeste aus einer fertigen Route herausschneiden.
+ *
+ * Ein "Ast" ist eine Stelle, an der die Route von einer Kreuzung wegfaehrt,
+ * in ein Tal hineinlaeuft und auf demselben Weg zu genau dieser Kreuzung
+ * zurueckkommt. Genau das entsteht, wenn ein Wegpunkt in einer Sackgasse
+ * liegt -- und genau das nervt beim Fahren.
+ *
+ * Der Trick: so ein Ast ist ein *geschlossener* Teilweg. Schneidet man ihn
+ * heraus, springt die Route von der Kreuzung zur Kreuzung -- sie bleibt also
+ * durchgehend und befahrbar. Es braucht keine neue Routing-Anfrage, weil
+ * nichts neu berechnet werden muss: was uebrig bleibt, ist ein Teilstueck
+ * der Strecke, die der Router ohnehin geliefert hat.
+ *
+ * Abgegrenzt wird gegen zwei Faelle, die *nicht* weg sollen:
+ *   - eine kleine Schleife (rein und auf anderem Weg heraus) -- die faehrt
+ *     sich nicht doppelt, erkennbar an geringem Rueckfahranteil;
+ *   - die Runde selbst, deren Anfang und Ende naturgemaess zusammenfallen --
+ *     deshalb die Deckelung auf einen Bruchteil der Gesamtlaenge.
+ */
+export function exciseSpurs(
+  coords,
+  {
+    joinM = 35,
+    minSpurM = 300,
+    retraceMin = 0.6,
+    maxShare = 0.6,
+    maxTotalShare = 0.5,
+    maxCuts = 10,
+  } = {},
+) {
+  let path = coords.slice();
+  const gesamtAnfang = lineLength(path);
+  let removedM = 0;
+  let cuts = 0;
+
+  while (cuts < maxCuts) {
+    // Beide Deckel beziehen sich auf die *urspruengliche* Laenge. Wuerde man
+    // gegen die schon geschrumpfte Route messen, fraessen sich zehn Schnitte
+    // nacheinander durch fast alles hindurch.
+    const nochErlaubt = gesamtAnfang * maxTotalShare - removedM;
+    if (nochErlaubt < minSpurM) break;
+
+    const spur = findSpur(path, {
+      joinM,
+      minSpurM,
+      retraceMin,
+      maxCutM: Math.min(gesamtAnfang * maxShare, nochErlaubt),
+    });
+    if (!spur) break;
+    const [i, j] = spur;
+    removedM += lineLength(path.slice(i, j + 1));
+    path = path.slice(0, i + 1).concat(path.slice(j + 1));
+    cuts++;
+  }
+  return { coords: path, removedM, cuts };
+}
+
+/** Punktindex an einer bestimmten Bogenlaenge, binaer gesucht. */
+function indexAt(cum, ziel, lo, hi) {
+  while (hi - lo > 1) {
+    const mid = (lo + hi) >> 1;
+    if (cum[mid] < ziel) lo = mid;
+    else hi = mid;
+  }
+  return lo;
+}
+
+/**
+ * Billiger Vorabtest: liegen gespiegelte Punkte des Teilwegs aufeinander?
+ *
+ * Bei einem Ast schon (hin und zurueck decken sich), bei einer Schleife
+ * nicht (gegenueberliegende Seiten). Ein Dutzend Stichproben statt der
+ * vollen Messung -- damit lassen sich *alle* Kandidaten bewerten statt nur
+ * der laengsten dreissig. Genau daran ist die erste Fassung gescheitert: auf
+ * einer Route, die sich oft selbst nahekommt, verdraengten lange
+ * Nachbarschaften die echten Aeste aus der Liste.
+ *
+ * Die Toleranz muss dieselbe sein wie bei der vollen Pruefung. War sie
+ * grosszuegiger, liessen sich versetzt nebeneinander laufende Bogen als
+ * Aeste durchwinken -- sie belegten die Rangliste und der echte Ast kam
+ * nie an die Reihe.
+ */
+function grobeSpiegelung(path, cum, i, j, tolM, proben = 12) {
+  const laenge = cum[j] - cum[i];
+  let treffer = 0;
+  for (let s = 1; s <= proben; s++) {
+    const t = (s / (proben + 1)) * 0.5;
+    const a = indexAt(cum, cum[i] + t * laenge, i, j);
+    const b = indexAt(cum, cum[j] - t * laenge, i, j);
+    if (distance(path[a], path[b]) <= tolM) treffer++;
+  }
+  return treffer / proben;
+}
+
+/** Den laengsten herausschneidbaren Ast finden, oder null. */
+function findSpur(path, { joinM, minSpurM, retraceMin, maxCutM }) {
+  if (path.length < 8) return null;
+  const cum = cumulativeDistance(path);
+  const total = cum[cum.length - 1];
+  if (total < minSpurM * 2) return null;
+
+  // Punkte in ein Raster einsortieren, damit wir nicht jedes Paar pruefen.
+  const degLat = joinM / 111320;
+  const cells = new Map();
+  const keyOf = (p) => {
+    const degLon = joinM / (111320 * Math.max(0.2, Math.cos(toRad(p[1]))));
+    return `${Math.round(p[1] / degLat)}:${Math.round(p[0] / degLon)}`;
+  };
+  path.forEach((p, i) => {
+    const key = keyOf(p);
+    if (!cells.has(key)) cells.set(key, []);
+    cells.get(key).push(i);
+  });
+
+  // Ueber die Zellen laufen, nicht ueber die Punkte: fuer jede Zelle zaehlen
+  // nur aufeinanderfolgende Besuche. Ein Ast ist genau das -- hin, und beim
+  // naechsten Mal zurueck.
+  //
+  // Der frueher naheliegende Weg (fuer jeden Punkt alle Partner suchen)
+  // erzeugt an dichten Stellen quadratisch viele Paare; ein Deckel dagegen
+  // kappt dann die hintere Haelfte der Route, und dort liegende Aeste werden
+  // nie gefunden. So bleibt die Zahl der Kandidaten bei hoechstens einem je
+  // Punkt -- gedeckelt und ueber die ganze Route gleich verteilt.
+  const kandidaten = [];
+  for (const liste of cells.values()) {
+    for (let k = 1; k < liste.length; k++) {
+      const i = liste[k - 1];
+      const j = liste[k];
+      const laenge = cum[j] - cum[i];
+      if (laenge < minSpurM || laenge > maxCutM) continue;
+      if (distance(path[i], path[j]) > joinM) continue;
+      kandidaten.push([i, j, laenge]);
+    }
+  }
+  if (!kandidaten.length) return null;
+
+  // Nach *Ast-Aehnlichkeit* ordnen, nicht nach Laenge. Die Laenge war der
+  // naheliegende Schluessel und genau der falsche: auf einer maeandernden
+  // Route stehen zwei Dutzend lange Nachbarschaften vor dem echten Ast, und
+  // der bekommt die volle Pruefung nie zu sehen.
+  const bewertet = kandidaten
+    .map((k) => [...k, grobeSpiegelung(path, cum, k[0], k[1], joinM * 1.5)])
+    .filter((k) => k[3] >= 0.6)
+    .sort((a, b) => b[3] - a[3] || b[2] - a[2]);
+
+  // Der Vorfilter ist grob; findet er nichts, bekommen die laengsten
+  // Kandidaten trotzdem noch die volle Pruefung.
+  const uebrig = bewertet.length ? bewertet : [...kandidaten].sort((a, b) => b[2] - a[2]);
+
+  for (const [i, j] of uebrig.slice(0, 40)) {
+    if (retraceRatio(path.slice(i, j + 1), joinM * 1.5) >= retraceMin) return [i, j];
+  }
+  return null;
+}
+
 /** Douglas-Peucker, damit wir z.B. fuer Google Maps wenige Stuetzpunkte haben. */
 export function simplify(coords, toleranceM = 200) {
   if (coords.length < 3) return coords.slice();
@@ -289,6 +494,20 @@ function perpendicularDistance(p, a, b) {
   const py = (p[1] - a[1]) * mLat;
   const t = clamp(((px - ax) * bx + (py - ay) * by) / (bx * bx + by * by), 0, 1);
   return Math.hypot(px - bx * t, py - by * t);
+}
+
+/**
+ * Liegt ein Punkt noch an der Route?
+ *
+ * Es reicht nicht, die Stuetzpunkte abzuklopfen: auf einer langen Geraden
+ * koennen die hunderte Meter auseinanderliegen. Deshalb vorher auf feste
+ * Schrittweite bringen.
+ */
+export function isNearPath(punkt, coords, toleranzM = 120, sampleM = 50) {
+  for (const p of resample(coords, sampleM)) {
+    if (distance(punkt, p) <= toleranzM) return true;
+  }
+  return false;
 }
 
 /** Gleichmaessig verteilte Punkte entlang der Route (inkl. Start und Ziel). */
