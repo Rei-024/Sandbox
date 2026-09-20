@@ -6,7 +6,7 @@
  * routers.js -- hier passiert nur Bedienung.
  */
 
-import { cumulativeDistance } from './geo.js';
+import { cumulativeDistance, overlapPercent } from './geo.js';
 import { generateRoutes } from './generator.js';
 import { BROUTER_PROFILES, createRouter, geocode, reverseGeocode } from './routers.js';
 import { MapView } from './mapview.js';
@@ -406,8 +406,11 @@ async function run() {
     if (matchMedia('(max-width: 899px)').matches) {
       $('map').scrollIntoView({ behavior: 'smooth', block: 'start' });
     }
+    const gewuenscht = state.settings.variants;
     setStatus(
-      `${candidates.length} Variante${candidates.length === 1 ? '' : 'n'} durchgerechnet – die beste steht unten.`,
+      candidates.length < gewuenscht
+        ? `${candidates.length} von ${gewuenscht} Varianten sind durchgekommen – die beste steht unten.`
+        : `${candidates.length} Variante${candidates.length === 1 ? '' : 'n'} durchgerechnet – die beste steht unten.`,
     );
     if (warnings.length) showAlert(warnings.join(' '), 'warn');
     nameRoute(best);
@@ -583,7 +586,10 @@ function describe(c) {
   if (delta <= -0.8) parts.push('kurviger gab die Gegend nicht her');
   else if (delta >= 0.8) parts.push('kurviger geworden als bestellt');
   if (c.curvature.hairpins > 3) parts.push(`${c.curvature.hairpins} enge Kehren`);
-  if (c.overlap > 0.12) parts.push('teilweise auf derselben Strasse zurück');
+  // Doppelt gefahrene Strecke ist der ehrlichste Qualitaetsindikator einer
+  // Runde -- lieber die Zahl zeigen als sie zu umschreiben.
+  const doppelt = overlapPercent(c.overlap);
+  if (doppelt >= 8) parts.push(`${doppelt} % doppelt gefahren`);
   parts.push(`Routing: ${c.provider === 'brouter' ? 'BRouter' : 'GraphHopper'} (${c.profileUsed})`);
   return parts.join(' · ');
 }

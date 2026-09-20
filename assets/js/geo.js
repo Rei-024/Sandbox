@@ -212,17 +212,20 @@ export function elevationStats(coords, thresholdM = 4) {
  * 0 = jede Strasse nur einmal, ~0.5 = komplett hin und auf demselben Weg
  * zurueck (mehr geht nicht, denn die Hinfahrt ist ja das Original).
  *
+ * Liefert ausserdem die doppelt befahrenen Punkte -- damit laesst sich der
+ * Wegpunkt finden, der die Stichstrasse verursacht hat.
+ *
  * Fuer eine Runde ist das die wichtigste Qualitaetsfrage: hin und auf
  * derselben Strasse zurueck ist langweilig. Umsetzung ueber ein Raster --
  * jede Zelle, die die Route schon einmal (und nicht unmittelbar davor)
  * besucht hat, zaehlt als Wiederholung.
  */
-export function overlapRatio(coords, cellM = 60) {
+export function overlapDetail(coords, cellM = 60) {
   const pts = resample(coords, cellM / 2);
-  if (pts.length < 4) return 0;
+  if (pts.length < 4) return { ratio: 0, repeated: [] };
   const seen = new Map();
   const degLat = cellM / 111320;
-  let repeated = 0;
+  const repeated = [];
   for (let i = 0; i < pts.length; i++) {
     const lat = pts[i][1];
     const degLon = cellM / (111320 * Math.max(0.2, Math.cos(toRad(lat))));
@@ -232,11 +235,19 @@ export function overlapRatio(coords, cellM = 60) {
     // nach deutlichem Abstand ist echtes Doppeltfahren. Der erste Besuch bleibt
     // gespeichert: sonst wuerde ein Wiedersehen den Zaehler zuruecksetzen und
     // jeder zweite Punkt der Rueckfahrt fiele durch.
-    if (prev !== undefined && i - prev > 20) repeated++;
+    if (prev !== undefined && i - prev > 20) repeated.push(pts[i]);
     else if (prev === undefined) seen.set(key, i);
   }
-  return repeated / pts.length;
+  return { ratio: repeated.length / pts.length, repeated };
 }
+
+export const overlapRatio = (coords, cellM = 60) => overlapDetail(coords, cellM).ratio;
+
+/**
+ * Anteil der Strecke, den man zweimal faehrt, als Prozentwert fuer die
+ * Oberflaeche: komplett hin und zurueck sind 100 %, nicht 50.
+ */
+export const overlapPercent = (ratio) => Math.min(100, Math.round(ratio * 200));
 
 /** Douglas-Peucker, damit wir z.B. fuer Google Maps wenige Stuetzpunkte haben. */
 export function simplify(coords, toleranceM = 200) {

@@ -14,11 +14,15 @@ export class FakeRouter {
    * @param {Array<{center: [number, number], radiusM: number}>} islands
    *        Zonen, die der Router nicht erreichen kann -- so verhaelt sich
    *        BRouter bei Waldwegen und abgeschnittenen Netzstuecken.
+   * @param {Array<{center: [number, number], radiusM: number}>} deadEnds
+   *        Sackgassentaeler: erreichbar, aber nur auf demselben Weg wieder
+   *        heraus. Genau daraus entstehen die Stichstrassen.
    */
-  constructor({ wiggle = 0.5, stepM = 120, islands = [] } = {}) {
+  constructor({ wiggle = 0.5, stepM = 120, islands = [], deadEnds = [] } = {}) {
     this.wiggle = wiggle;
     this.stepM = stepM;
     this.islands = islands;
+    this.deadEnds = deadEnds;
     this.calls = 0;
     this.rejections = 0;
     this.provider = 'fake';
@@ -39,9 +43,20 @@ export class FakeRouter {
         });
       }
     }
+    // Wegpunkte in Sackgassentaelern zwingen zur Rueckfahrt auf demselben Weg.
+    const path = [];
+    for (let i = 0; i < points.length; i++) {
+      path.push(points[i]);
+      const inValley =
+        i > 0 &&
+        i < points.length - 1 &&
+        this.deadEnds.some((d) => distance(points[i], d.center) < d.radiusM);
+      if (inValley) path.push(points[i - 1]);
+    }
+
     const coords = [];
-    for (let i = 1; i < points.length; i++) {
-      const seg = this.#segment(points[i - 1], points[i]);
+    for (let i = 1; i < path.length; i++) {
+      const seg = this.#segment(path[i - 1], path[i]);
       coords.push(...(i === 1 ? seg : seg.slice(1)));
     }
     const distanceM = lineLength(coords);

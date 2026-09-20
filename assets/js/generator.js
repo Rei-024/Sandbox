@@ -25,14 +25,18 @@ import {
   elevationStats,
   estimateSpeedKmh,
   levelToDegPerKm,
-  overlapRatio,
+  overlapDetail,
 } from './geo.js';
 
 const MAX_ITERATIONS = 3; // Routing-Anfragen je Variante
 const TIME_TOLERANCE = 0.1; // 10 % Abweichung sind gut genug
 const REQUEST_GAP_MS = 350; // schont die oeffentlichen Server
-const MAX_REPAIRS = 9; // Zusatzanfragen fuer unerreichbare Wegpunkte, insgesamt
-const MAX_REPAIRS_PER_CALL = 3; // damit ein zaeher Fall nicht alle Varianten auffrisst
+const MAX_REPAIRS_TOTAL = 12; // Zusatzanfragen fuer unerreichbare Wegpunkte, je Suche
+const MAX_REPAIRS_PER_VARIANT = 4; // damit ein zaeher Fall nicht alle Varianten auffrisst
+const MAX_REPAIRS_PER_CALL = 3;
+const MAX_TRIES_PER_VARIANT = 4; // Routing-Anfragen je Variante, ohne Reparaturen
+const SPUR_LIMIT = 0.12; // ab hier lohnt es, gegen Stichstrassen vorzugehen
+const MAX_SPUR_FIXES = 2;
 
 /** Kleiner deterministischer Zufallsgenerator, damit "neu wuerfeln" reproduzierbar ist. */
 export function mulberry32(seed) {
@@ -61,15 +65,20 @@ export function measure(route) {
     elevation,
     speedKmh,
     durationMin: km > 0 ? (km / speedKmh) * 60 : 0,
-    overlap: overlapRatio(route.coords),
+    overlap: overlapDetail(route.coords).ratio,
   };
 }
 
+/**
+ * Kleiner ist besser. Doppelt gefahrene Strecke wiegt bei einer Runde schwer:
+ * eine Runde, die als Stern aus Stichstrassen herauskommt, ist keine Runde --
+ * lieber eine, die die Wunschzeit um zwanzig Minuten verfehlt.
+ */
 function scoreCandidate(m, request) {
   const timeErr = Math.abs(m.durationMin - request.durationMin) / request.durationMin;
   const curvErr = Math.abs(m.curvinessLevel - request.curviness) / 4;
-  const overlapWeight = request.mode === 'loop' ? 0.7 : 0.35;
-  const uTurnPenalty = Math.min(0.2, m.curvature.uTurns * 0.03);
+  const overlapWeight = request.mode === 'loop' ? 1.8 : 0.8;
+  const uTurnPenalty = Math.min(0.3, m.curvature.uTurns * 0.04);
   return timeErr + 0.7 * curvErr + overlapWeight * m.overlap + uTurnPenalty;
 }
 
@@ -146,6 +155,41 @@ export function nudgeWaypoints(waypoints, section, attempt, rng, anchor) {
     const inward = destination(wp, bearingBetween(wp, anchor), distance(wp, anchor) * pull);
     return destination(inward, rng() * 360, 400 + 600 * rng());
   });
+}
+
+/**
+ * Welcher Wegpunkt hat die Stichstrasse verursacht?
+ *
+ * Ein Wegpunkt in einem Sackgassental zwingt den Router hinein und auf
+ * demselben Weg wieder heraus. Die doppelt befahrenen Punkte haeufen sich
+ * dann rund um diesen Wegpunkt -- wer die meisten davon in seiner Naehe hat,
+ * ist der Schuldige.
+ */
+export function spurCulprit(waypoints, repeated, radiusM = 3000) {
+  let best = -1;
+  let bestCount = 0;
+  waypoints.forEach((wp, i) => {
+    let n = 0;
+    for (const p of repeated) if (distance(p, wp) < radiusM) n++;
+    if (n > bestCount) {
+      bestCount = n;
+      best = i;
+    }
+  });
+  return bestCount >= 3 ? best : -1;
+}
+
+/**
+ * Den Wegpunkt auf dem Ring weiterdrehen: gleicher Abstand zum Start, anderes
+ * Tal. Das haelt die Streckenlaenge stabil und holt den Punkt trotzdem aus der
+ * Sackgasse heraus.
+ */
+export function rotateWaypoint(waypoints, index, start, rng) {
+  const wp = waypoints[index];
+  const radius = distance(start, wp);
+  const turn = (rng() < 0.5 ? -1 : 1) * (25 + 35 * rng());
+  const moved = destination(start, bearingBetween(start, wp) + turn, radius);
+  return waypoints.map((p, i) => (i === index ? moved : p));
 }
 
 /** Letzter Ausweg: den verdaechtigen Wegpunkt ganz weglassen. */
@@ -227,8 +271,8 @@ export async function generateRoutes(
 
   const normalized = { ...request, mode, durationMin, curviness, variants };
   const candidates = [];
-  const warnings = [];
-  const budget = { left: MAX_REPAIRS };
+  const failures = [];
+  const pool = { left: MAX_REPAIRS_TOTAL };
   let lastError = null;
   let requestCount = 0;
 
@@ -242,6 +286,10 @@ export async function generateRoutes(
   for (let v = 0; v < variants; v++) {
     const rng = mulberry32(seed + v * 7919);
     const bearing0 = bearing != null ? bearing + (v * 360) / variants : rng() * 360;
+    // Jede Variante bekommt ihren eigenen Reparaturvorrat, sonst frisst die
+    // erste in unwegsamem Gelaende alles auf und die anderen fallen aus.
+    const budget = { left: Math.min(pool.left, MAX_REPAIRS_PER_VARIANT) };
+    const granted = budget.left;
 
     try {
       const produced =
@@ -257,14 +305,16 @@ export async function generateRoutes(
               onProgress,
               v,
               variants,
-              warnings,
+              failures,
               budget,
             });
       candidates.push(...produced);
     } catch (err) {
       if (err.name === 'AbortError') throw err;
       lastError = err;
-      warnings.push(`Variante ${v + 1}: ${err.message}`);
+      failures.push({ variant: v + 1, message: err.message });
+    } finally {
+      pool.left -= granted - budget.left;
     }
   }
 
@@ -280,7 +330,31 @@ export async function generateRoutes(
   shortlist.forEach((c, i) => {
     c.rank = i + 1;
   });
-  return { candidates: shortlist, best: shortlist[0], attempts: candidates.length, warnings };
+  return {
+    candidates: shortlist,
+    best: shortlist[0],
+    attempts: candidates.length,
+    warnings: summarize(failures),
+  };
+}
+
+/**
+ * Gleiche Fehler zusammenfassen -- dreimal derselbe Satz untereinander liest
+ * sich wie ein Totalausfall, obwohl es dieselbe Ursache ist.
+ */
+function summarize(failures) {
+  const byMessage = new Map();
+  for (const f of failures) {
+    if (!byMessage.has(f.message)) byMessage.set(f.message, []);
+    byMessage.get(f.message).push(f.variant);
+  }
+  return [...byMessage].map(([message, variants]) => {
+    const list =
+      variants.length === 1
+        ? `Variante ${variants[0]}`
+        : `Varianten ${variants.slice(0, -1).join(', ')} und ${variants[variants.length - 1]}`;
+    return `${list}: ${message}`;
+  });
 }
 
 /**
@@ -316,8 +390,11 @@ async function buildLoop({ start, bearing0, rng, normalized, call, onProgress, v
   const detour = 1.15 + 0.22 * twisty; // Strassen sind laenger als der Idealkreis
   let radius = targetDistanceM(durationMin, curviness) / (2 * Math.PI * detour);
 
+  let waypoints = ringWaypoints(start, radius, curviness, bearing0, rng);
+  let spurFixes = 0;
   const out = [];
-  for (let iter = 0; iter < MAX_ITERATIONS; iter++) {
+
+  for (let iter = 0; iter < MAX_TRIES_PER_VARIANT; iter++) {
     onProgress({
       variant: v + 1,
       variants,
@@ -326,19 +403,47 @@ async function buildLoop({ start, bearing0, rng, normalized, call, onProgress, v
     });
 
     const { route, waypoints: used } = await routeWithRepair({
-      waypoints: ringWaypoints(start, radius, curviness, bearing0, rng),
+      waypoints,
       assemble: (wps) => [start, ...wps, start],
       anchor: start,
       call,
       rng,
       budget,
     });
+    waypoints = used;
     const candidate = finalize(route, used, normalized, { seedBearing: bearing0 });
     out.push(candidate);
 
     const ratio = durationMin / Math.max(1, candidate.durationMin);
-    if (Math.abs(1 - ratio) <= TIME_TOLERANCE) break;
-    radius *= clamp(ratio, 0.6, 1.7) ** 0.9;
+    const timeOk = Math.abs(1 - ratio) <= TIME_TOLERANCE;
+    const spurOk = candidate.overlap <= SPUR_LIMIT;
+    if (timeOk && spurOk) break;
+
+    // Erst die Zeit treffen -- eine Route, die eine Stunde danebenliegt,
+    // muss man nicht auf Stichstrassen abklopfen.
+    if (!timeOk) {
+      radius *= clamp(ratio, 0.6, 1.7) ** 0.9;
+      waypoints = ringWaypoints(start, radius, curviness, bearing0, rng);
+      continue;
+    }
+
+    if (spurFixes >= MAX_SPUR_FIXES) break;
+    const culprit = spurCulprit(waypoints, overlapDetail(route.coords).repeated);
+    if (culprit < 0) break; // kein einzelner Schuldiger -- die Gegend gibt es nicht her
+    onProgress({
+      variant: v + 1,
+      variants,
+      attempt: iter + 1,
+      message: `Variante ${v + 1}/${variants} – Stichstrasse umgehen`,
+    });
+    // Erst versetzen, dann streichen.
+    const fixed =
+      spurFixes === 0
+        ? rotateWaypoint(waypoints, culprit, start, rng)
+        : dropWaypoint(waypoints, culprit + 1);
+    if (!fixed) break;
+    waypoints = fixed;
+    spurFixes++;
   }
   return out;
 }
@@ -353,7 +458,7 @@ async function buildOneWay({
   onProgress,
   v,
   variants,
-  warnings,
+  failures,
   budget,
 }) {
   const { durationMin, curviness } = normalized;
@@ -370,11 +475,12 @@ async function buildOneWay({
 
     if (directCandidate.durationMin > durationMin * (1 + TIME_TOLERANCE)) {
       if (v === 0) {
-        warnings.push(
-          `Die direkte Strecke zum Ziel dauert schon rund ${Math.round(
+        failures.push({
+          variant: v + 1,
+          message: `Die direkte Strecke zum Ziel dauert schon rund ${Math.round(
             directCandidate.durationMin,
-          )} min – kuerzer als die Wunschdauer geht es nicht.`,
-        );
+          )} min – kürzer als die Wunschdauer geht es nicht.`,
+        });
       }
       return out;
     }

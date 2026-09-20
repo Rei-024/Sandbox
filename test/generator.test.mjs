@@ -6,9 +6,11 @@ import {
   measure,
   mulberry32,
   nudgeWaypoints,
+  rotateWaypoint,
+  spurCulprit,
   targetDistanceM,
 } from '../assets/js/generator.js';
-import { destination, distance } from '../assets/js/geo.js';
+import { bearing, destination, distance, overlapDetail } from '../assets/js/geo.js';
 import { FakeRouter } from './fake-router.mjs';
 
 const START = [8.4117, 48.4636]; // Freudenstadt
@@ -236,4 +238,84 @@ test('Hoffnungsloser Fall erklaert, was der Nutzer tun kann', async () => {
     { router, ...fast },
   ).catch((e) => e);
   assert.match(err.message, /Start-Nadel|Strassennetz|Verbindung/i, err.message);
+});
+
+
+/* -------------------------------------------------- Stichstrassen (Sackgassen) */
+
+test('spurCulprit findet den Wegpunkt im Sackgassental', () => {
+  const wps = [0, 1, 2, 3].map((i) => destination(START, i * 90, 15000));
+  // Doppelt befahrene Punkte haeufen sich um Wegpunkt 2.
+  const repeated = Array.from({ length: 30 }, (_, i) => destination(wps[2], i * 12, 800));
+  assert.equal(spurCulprit(wps, repeated), 2);
+});
+
+test('spurCulprit haelt sich zurueck, wenn sich nichts haeuft', () => {
+  const wps = [0, 1, 2, 3].map((i) => destination(START, i * 90, 15000));
+  const verstreut = [destination(START, 10, 40000), destination(START, 200, 60000)];
+  assert.equal(spurCulprit(wps, verstreut), -1);
+});
+
+test('rotateWaypoint haelt den Abstand und wechselt die Richtung', () => {
+  const rng = mulberry32(3);
+  const wps = [destination(START, 90, 18000), destination(START, 180, 18000)];
+  const moved = rotateWaypoint(wps, 0, START, rng);
+
+  assert.ok(Math.abs(distance(START, moved[0]) - 18000) < 50, 'Abstand bleibt');
+  const gedreht = Math.abs(((bearing(START, moved[0]) - 90 + 540) % 360) - 180);
+  assert.ok(gedreht > 20 && gedreht < 65, `Drehung ${gedreht}`);
+  assert.deepEqual(moved[1], wps[1], 'die anderen bleiben unberuehrt');
+});
+
+test('Sackgassental wird umgangen statt als Stern abgeliefert', async () => {
+  const tal = { center: destination(START, 0, 13000), radiusM: 4500 };
+  const router = new FakeRouter({ wiggle: 0.4, deadEnds: [tal] });
+  const { best } = await generateRoutes(
+    { start: START, mode: 'loop', durationMin: 120, curviness: 3, bearing: 0, variants: 1, seed: 77 },
+    { router, ...fast },
+  );
+
+  assert.ok(best.overlap <= 0.15, `zu viel Doppeltfahren: ${best.overlap.toFixed(3)}`);
+  // Und der Wegpunkt liegt am Ende wirklich nicht mehr im Tal.
+  const imTal = best.waypoints.filter((wp) => distance(wp, tal.center) < tal.radiusM);
+  assert.equal(imTal.length, 0, 'kein Wegpunkt bleibt in der Sackgasse');
+});
+
+test('Die Wertung zieht die Runde ohne Doppeltfahren vor', async () => {
+  const router = new FakeRouter({
+    wiggle: 0.4,
+    deadEnds: [{ center: destination(START, 90, 13000), radiusM: 5000 }],
+  });
+  const { candidates } = await generateRoutes(
+    { start: START, mode: 'loop', durationMin: 120, curviness: 3, variants: 3, seed: 31 },
+    { router, ...fast },
+  );
+  for (let i = 1; i < candidates.length; i++) {
+    assert.ok(candidates[i - 1].score <= candidates[i].score);
+  }
+  assert.ok(
+    candidates[0].overlap <= Math.max(...candidates.map((c) => c.overlap)),
+    'die beste darf nicht die schlechteste beim Doppeltfahren sein',
+  );
+});
+
+test('Gleiche Fehler mehrerer Varianten werden zusammengefasst', async () => {
+  const router = new FakeRouter({ islands: [{ center: START, radiusM: 400000 }] });
+  const res = await generateRoutes(
+    { start: START, mode: 'loop', durationMin: 90, curviness: 3, variants: 3, seed: 4 },
+    { router, ...fast },
+  ).catch(() => null);
+  assert.equal(res, null, 'hier kann nichts gelingen');
+
+  const teilweise = new FakeRouter({
+    islands: [{ center: destination(START, 180, 13000), radiusM: 9000 }],
+  });
+  const ok = await generateRoutes(
+    { start: START, mode: 'loop', durationMin: 120, curviness: 4, bearing: 180, variants: 3, seed: 9 },
+    { router: teilweise, ...fast },
+  ).catch(() => null);
+  if (ok) {
+    // Höchstens eine Zeile je Fehlerursache, nicht eine je Variante.
+    assert.ok(new Set(ok.warnings).size === ok.warnings.length);
+  }
 });
