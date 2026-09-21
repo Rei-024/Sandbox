@@ -19,13 +19,17 @@ import {
   overlapPercent,
 } from '../assets/js/geo.js';
 import { generateRoutes, mulberry32, targetDistanceM } from '../assets/js/generator.js';
-import { snapWaypoints, tollNogos, tollRoadsNear } from '../assets/js/roads.js';
+import { autobahnNogos, snapWaypoints, tollNogos, tollRoadsNear } from '../assets/js/roads.js';
 import { abfrageGebiet } from '../assets/js/app.js';
 import { buildGpx, GOOGLE_MAX_WAYPOINTS, googleMapsUrl } from '../assets/js/export.js';
 import { FakeRouter } from './fake-router.mjs';
 import { RoadGraph } from './graph.mjs';
 
 const DURCHLAEUFE = Number(process.argv[2] ?? 200);
+// Mit SAAT laesst sich derselbe Pruefstand ueber eine andere Stichprobe von
+// Welten laufen. Bleibt eine Kennzahl dabei stabil, misst sie das Verfahren;
+// springt sie, misst sie die Wuerfel.
+const SAAT = Number(process.env.SAAT ?? 0);
 const START = [13.6167, 47.6417];
 
 const verstoesse = [];
@@ -172,6 +176,7 @@ function talwelt(rng, reichweiteM = 16000) {
   const kranz = (mitte, radius, zahl) =>
     Array.from({ length: zahl }, (_, i) => ziel(mitte, (360 * i) / zahl + rng() * 30, radius * (0.8 + rng() * 0.4)));
 
+  const talPunkte = [];
   const taeler = 3 + Math.floor(rng() * 2);
   const koepfe = [];
   const sackgassen = [];
@@ -180,12 +185,17 @@ function talwelt(rng, reichweiteM = 16000) {
     const laenge = reichweiteM * (0.9 + rng() * 1.1);
     // Die Talstrasse schlaengelt sich, statt schnurgerade zu laufen.
     let vorher = START;
+    const vonHier = punkte.length;
     for (let s = 1; s <= 4; s++) {
       const p = ziel(START, richtung + (rng() - 0.5) * 30, (laenge * s) / 4);
       strecke(vorher, p);
       vorher = p;
     }
     koepfe.push(vorher);
+    // Die Talstrasse eines Tals merken -- neben sie kommt spaeter die Autobahn.
+    if (!talPunkte.length && rng() < 0.6) {
+      talPunkte.push(...punkte.slice(vonHier).map((q) => [q[0], q[1]]));
+    }
 
     if (rng() < 0.35) {
       // Lutscher: nur eine Wendeschleife am Kopf, sonst nichts.
@@ -206,18 +216,77 @@ function talwelt(rng, reichweiteM = 16000) {
   }
 
   // Passstrassen zwischen benachbarten Taelern -- aber nicht ueberall.
+  // Eine davon kostet Maut, und zwar auf ihrer ganzen Laenge. Maut als
+  // Zufallspunkte mitten auf normalen Strassen zu verteilen waere bequemer,
+  // ergibt aber Sperrzonen, die gewoehnliche Strassen zerschneiden -- der
+  // Pruefstand misst dann sein eigenes Fixture.
+  //
+  // Mindestens einer davon existiert immer. Das ist nicht Bequemlichkeit,
+  // sondern Messbarkeit: ohne Pass gibt es in dieser Welt ueberhaupt keine
+  // Runde, und der Pruefstand misst dann, ob die Wuerfel eine Gegend
+  // ausgespuckt haben, in der die Aufgabe loesbar war -- nicht, ob die App
+  // sie loest. Genau diese Streuung hat dieselbe Kennzahl je nach Saat
+  // zwischen 18 und 73 Prozent schwanken lassen.
+  const mautVon = [];
+  const garantiert = Math.floor(rng() * koepfe.length);
   for (let i = 0; i < koepfe.length; i++) {
-    if (rng() < 0.4) strecke(koepfe[i], koepfe[(i + 1) % koepfe.length], 120);
+    if (i !== garantiert && rng() >= 0.4) continue;
+    const vorher = punkte.length;
+    strecke(koepfe[i], koepfe[(i + 1) % koepfe.length], 120);
+    if (!mautVon.length && rng() < 0.5) mautVon.push([vorher, punkte.length]);
   }
 
+  // Ortschaften an der Talstrasse: ein kurzer Stich in ein winziges
+  // Strassengeviert und wieder heraus. Genau daraus entstehen die
+  // "Irrfahrten durch Ortschaften zum Umdrehen" -- ein Ast von 200 bis 500
+  // Metern, viel kuerzer als ein Sacktal, und deshalb der Fall, den die
+  // Mindestlaenge der Astsuche entweder trifft oder verfehlt.
+  const orte = process.env.OHNE_ORTE ? 0 : 4 + Math.floor(rng() * 4);
+  for (let o = 0; o < orte; o++) {
+    if (punkte.length < 20) break;
+    const an = punkte[Math.floor(rng() * punkte.length)];
+    const richtung = rng() * 360;
+    const stich = ziel([an[0], an[1]], richtung, 150 + rng() * 250);
+    strecke([an[0], an[1]], stich, 60, 0.2);
+    const gasse = kranz(stich, 80 + rng() * 120, 4);
+    for (let i = 0; i < gasse.length; i++) {
+      strecke(gasse[i], gasse[(i + 1) % gasse.length], 60, 0.1);
+    }
+    strecke(stich, gasse[0], 60, 0.1);
+  }
+
+  const istMaut = (i) => mautVon.some(([von, bis]) => i >= von && i < bis);
   const roads = punkte.map((p, i) => ({
     point: [p[0], p[1]],
     highway: ['primary', 'secondary', 'tertiary', 'unclassified'][i % 4],
-    toll: rng() < 0.02,
-    name: null,
+    toll: istMaut(i),
+    name: istMaut(i) ? 'Testmautpass' : null,
   }));
 
-  return { korridore: punkte, roads, inseln: [], sackgassen, kanten };
+  // Eine Autobahn laengs durch eines der Taeler, mit der Talstrasse als
+  // direkter Nachbarin -- so liegt die A10 im Salzachtal. Genau dieser Fall
+  // muss die Sperrzonen aushalten, ohne das Tal dichtzumachen.
+  //
+  // Wichtig ist, dass sie der Talstrasse *folgt*, statt quer ueber sie
+  // hinwegzulaufen: eine Autobahn, die alle paar hundert Meter die
+  // Bundesstrasse kreuzt, gibt es nirgends, und sie wuerde den Pruefstand
+  // ein Problem messen lassen, das nur das Fixture hat.
+  const bahn = [];
+  if (talPunkte.length > 4) {
+    const seite = rng() < 0.5 ? 90 : -90;
+    const abstand = 100 + rng() * 150;
+    for (let i = 2; i < talPunkte.length - 2; i += 5) {
+      const kurs = bearingZwischen(talPunkte[i - 1], talPunkte[i + 1]);
+      bahn.push({
+        point: ziel(talPunkte[i], kurs + seite, abstand),
+        highway: i % 35 === 0 ? 'motorway_link' : 'motorway',
+        toll: false,
+        name: 'A-Test',
+      });
+    }
+  }
+
+  return { korridore: punkte, roads: [...roads, ...bahn], inseln: [], sackgassen, kanten };
 }
 
 const bearingZwischen = (a, b) => {
@@ -278,7 +347,12 @@ function pruefeRoute(lauf, kandidat, anfrage, weltDaten) {
     pruefe(Number.isFinite(wert) && wert >= 0, lauf, `${name} unbrauchbar`, wert);
   }
   pruefe(kandidat.curvinessLevel >= 1 && kandidat.curvinessLevel <= 5, lauf, 'Kurvigkeit ausserhalb 1..5', kandidat.curvinessLevel);
-  pruefe(kandidat.overlap <= 0.5001, lauf, 'Doppeltfahren > 50 %', kandidat.overlap);
+  // Kein harter Verstoss, sondern eine Qualitaetszahl: overlapDetail zaehlt
+  // jeden Wiederbesuch, nicht nur den zweiten. Ein dreifach befahrener
+  // Abschnitt kommt also legitim ueber 0,5 -- die frueher hier stehende
+  // Zusicherung "nie mehr als 0,5" behauptete eine Schranke, die das Mass
+  // gar nicht hat. Gezaehlt wird es unten im Budget.
+  if (kandidat.overlap > 0.5) dreifach.push(kandidat.overlap);
   pruefe(
     Math.abs(lineLength(c) - kandidat.distanceM) < Math.max(50, kandidat.distanceM * 0.01),
     lauf,
@@ -387,10 +461,13 @@ const ausfaelle = [];
 const zeitDetail = [];
 const achten = [];
 const schnitte = [];
+const dreifach = [];
+let sperrenGefallen = 0;
+let laeufeMitBahn = 0;
 const richtungsfehler = [];
 
 for (let lauf = 1; lauf <= DURCHLAEUFE; lauf++) {
-  const rng = mulberry32(lauf * 2654435761);
+  const rng = mulberry32((lauf + SAAT * 1000) * 2654435761);
 
   const mode = rng() < 0.7 ? 'loop' : 'oneway';
   const anfrage = {
@@ -414,15 +491,28 @@ for (let lauf = 1; lauf <= DURCHLAEUFE; lauf++) {
   const reichweite = Math.max(6000, targetDistanceM(anfrage.durationMin, anfrage.curviness) / 6);
   // Die Haelfte der Runden spielt im Gebirge: Knotenort, Taeler, Sackgassen.
   const imGebirge = anfrage.mode === 'loop' && rng() < 0.5;
+  // Eigener Zufallsstrom fuer den Weltenbau.
+  //
+  // Vorher teilten sich Anfrage und Welt einen Strom. Dann verschiebt jede
+  // Aenderung am Weltenbau -- eine Zeile mehr, die rng() aufruft -- saemtliche
+  // spaeteren Zufallszahlen, und zwei Messungen vergleichen unterschiedliche
+  // Welten statt unterschiedlicher Verfahren. Ein Zusatz, der die Kennzahl
+  // scheinbar von 18 auf 73 Prozent trieb, hat in Wahrheit nur die Karten
+  // neu gemischt.
+  const weltRng = mulberry32((lauf + SAAT * 1000) * 2246822519 + 17);
   const w = imGebirge
-    ? talwelt(rng, reichweite)
-    : welt(rng, reichweite, anfrage.mode === 'oneway' ? gebiet.centers.slice(1) : []);
+    ? talwelt(weltRng, reichweite)
+    : welt(weltRng, reichweite, anfrage.mode === 'oneway' ? gebiet.centers.slice(1) : []);
   const roads = w.roads;
   if (anfrage.mode === 'oneway' && anfrage.endIndex != null) {
     anfrage.end = w.korridore[anfrage.endIndex % w.korridore.length].slice(0, 2);
   }
+  const frei = [anfrage.start, anfrage.end];
   if (anfrage.avoidToll) {
-    anfrage.nogos = tollNogos(roads, { keepClear: [anfrage.start, anfrage.end] });
+    anfrage.nogos = tollNogos(roads, { keepClear: frei });
+  }
+  if (anfrage.avoidMotorway) {
+    anfrage.nogos = [...anfrage.nogos, ...autobahnNogos(roads, { keepClear: frei })];
   }
 
   const router = new FakeRouter({
@@ -481,6 +571,21 @@ for (let lauf = 1; lauf <= DURCHLAEUFE; lauf++) {
     // das, wonach gefragt war.
     if (anfrage.mode === 'loop') achten.push(ergebnis.best.startRevisits ?? 0);
     schnitte.push(ergebnis.best.spurCuts ?? 0);
+    if (process.env.PROBE && ergebnis.best.overlap > 0.3) {
+      const b = ergebnis.best;
+      console.log({
+        lauf, imGebirge,
+        km: Math.round(b.distanceM / 1000),
+        zielKm: Math.round(targetDistanceM(anfrage.durationMin, anfrage.curviness) / 1000),
+        overlap: +(b.overlap * 100).toFixed(0),
+        schnitte: b.spurCuts,
+        geschnittenKm: +(b.spursRemovedM / 1000).toFixed(1),
+        wegpunkte: b.waypoints.length,
+        dauer: anfrage.durationMin,
+      });
+    }
+    sperrenGefallen += router.sperrenGefallen;
+    laeufeMitBahn += router.graph ? 1 : 0;
 
     // Haelt sich die Route an die Wunschrichtung? Gemessen am Schwerpunkt der
     // Strecke: liegt er in der gewuenschten Himmelsrichtung vom Start aus?
@@ -511,8 +616,14 @@ const p90 = (a) => (a.length ? [...a].sort((x, y) => x - y)[Math.floor(a.length 
 console.log(`Dauer: ${((Date.now() - start) / 1000).toFixed(1)} s`);
 console.log(`Erfolgreich:        ${erfolge}/${DURCHLAEUFE}  (ohne Route: ${fehlschlaege})`);
 console.log(`Anfragen je Lauf:   ${(anfragen / DURCHLAEUFE).toFixed(1)}`);
+const vielDoppelt = overlaps.filter((o) => overlapPercent(o) > 25).length;
 console.log(`Doppeltfahren:      Median ${overlapPercent(med(overlaps))} %, P90 ${overlapPercent(p90(overlaps))} %`);
+console.log(
+  `  davon ueber 25 %:  ${vielDoppelt}/${overlaps.length} (${Math.round((vielDoppelt / Math.max(1, overlaps.length)) * 100)} %)`,
+);
 console.log(`Zeitabweichung:     Median ${(med(zeitfehler) * 100).toFixed(0)} %, P90 ${(p90(zeitfehler) * 100).toFixed(0)} %`);
+console.log(`Mehr als doppelt:   ${dreifach.length} Kandidaten (Abschnitte dreifach befahren)`);
+console.log(`Sperren gefallen:   ${sperrenGefallen}x in ${laeufeMitBahn} Gebirgslaeufen`);
 const mitSchnitt = schnitte.filter((x) => x > 0).length;
 console.log(
   `Aeste geschnitten:  bei ${mitSchnitt}/${schnitte.length} Strecken (${schnitte.reduce((a, b) => a + b, 0)} Schnitte)`,
@@ -560,18 +671,23 @@ if (process.env.DETAIL) {
 }
 
 /*
- * Obergrenzen statt Wunschwerte. Sie stehen ueber dem, was heute gemessen
- * wird, aber deutlich unter dem Zustand davor -- gedacht sind sie als
- * Sperre gegen einen Rueckfall, nicht als Ziel. Wer sie reisst, hat die
- * Wegpunktlogik verschlechtert, auch wenn kein einzelner Lauf abstuerzt.
+ * Obergrenzen statt Wunschwerte -- eine Sperre gegen Rueckfall, kein Ziel.
  *
- * Gemessen am 21.09.2026: Doppeltfahren P90 21 %, Achten 14 %,
- * Richtung verfehlt (Runde) Median 22 Grad.
+ * Bewusst *keine* P90-Werte: ein Tail-Wert ueber rund achtzig Gebirgsrunden
+ * schwankt allein durch die Saat zwischen 9 und 26 Prozent. Anteile und
+ * Mediane bleiben dagegen ueber verschiedene Saaten stabil, und nur was
+ * stabil ist, taugt als Schranke. Mit `SAAT=1` laesst sich das nachpruefen.
+ *
+ * Gemessen ueber die Saaten 0, 1 und 2 (21.09.2026):
+ * viel Doppeltfahren 5-8 %, Achten 12-16 %, Richtung 23-28 Grad,
+ * Zeitabweichung Median 5-6 %.
  */
 const budget = [
-  ['Doppeltfahren P90', overlapPercent(p90(overlaps)), 35, '%'],
+  ['Anteil mit viel Doppeltfahren', Math.round((vielDoppelt / Math.max(1, overlaps.length)) * 100), 15, '%'],
+  ['Mehrfach befahrene Strecken', dreifach.length, 6, ' Stueck'],
   ['Achten-Anteil', Math.round((mitAcht / Math.max(1, achten.length)) * 100), 25, '%'],
   ['Richtung verfehlt (Runde, Median)', Math.round(med(richtungsfehler.filter((r) => r.mode === 'loop').map((r) => r.ab))), 40, '°'],
+  ['Zeitabweichung Median', Math.round(med(zeitfehler) * 100), 12, '%'],
 ];
 for (const [was, ist, grenze, einheit] of budget) {
   if (ist > grenze) melde(0, `${was} ueber Budget`, `${ist}${einheit} > ${grenze}${einheit}`);

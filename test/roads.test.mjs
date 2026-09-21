@@ -1,6 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  AUTOBAHN_RADIUS_M,
+  autobahnNogos,
+  autobahnenNear,
   buildOverpassQuery,
   classPenaltyM,
   fetchRoadNetwork,
@@ -225,4 +228,63 @@ test('Warnschwelle und Sperrradius sind derselbe Wert', () => {
   for (let i = 0; i <= 40; i++) auf.push(destination(START, 90, i * 100));
   const knapp = { point: destination(auf[20], 0, TOLL_RADIUS_M + 40), toll: true, highway: 'tertiary', name: 'Knapp daneben' };
   assert.deepEqual(tollRoadsNear(auf, [knapp]), [], 'außerhalb des Sperrradius keine Warnung');
+});
+
+
+test('Autobahn: abgefragt, nie Wegpunktziel, aber gesperrt', () => {
+  const q = buildOverpassQuery(START, 17000);
+  assert.match(q, /motorway/, 'Autobahn wird mit abgefragt');
+  assert.doesNotMatch(
+    buildOverpassQuery(START, 17000, 2000, { mitAutobahn: false }),
+    /motorway/,
+    'und laesst sich abschalten',
+  );
+
+  const bahn = destination(START, 90, 4000);
+  const neben = destination(START, 90, 4050); // 50 m -- innerhalb des Sperrkreises
+  const roads = [
+    { point: bahn, highway: 'motorway', name: 'A10', toll: false },
+    { point: neben, highway: 'secondary', name: 'B159', toll: false },
+  ];
+
+  // Auf die Autobahn wird nie geschnappt -- auch nicht, wenn sie am
+  // naechsten liegt.
+  const [ziel] = snapWaypoints([destination(START, 90, 3900)], roads, { curviness: 3 });
+  assert.deepEqual(ziel, neben, 'der Wegpunkt landet auf der Bundesstrasse');
+
+  // Gesperrt wird sie -- aber nicht, wenn die Sperre die Nachbarstrasse
+  // mitnehmen wuerde.
+  assert.equal(
+    autobahnNogos(roads).length,
+    0,
+    'kein Sperrkreis, der die Bundesstrasse mit einschliesst',
+  );
+  const weitWeg = [
+    { point: bahn, highway: 'motorway', name: 'A10', toll: false },
+    { point: destination(START, 90, 5000), highway: 'secondary', name: 'B159', toll: false },
+  ];
+  const nogos = autobahnNogos(weitWeg);
+  assert.equal(nogos.length, 1, 'liegt die Nachbarstrasse weit genug, wird gesperrt');
+  assert.equal(nogos[0][2], AUTOBAHN_RADIUS_M);
+
+  // Start und Ziel bleiben frei -- eine Sperre auf der eigenen Zufahrt
+  // macht die Suche unmoeglich, statt die Autobahn zu vermeiden.
+  assert.equal(
+    autobahnNogos(weitWeg, { keepClear: [destination(START, 90, 4100)] }).length,
+    0,
+    'nichts direkt am Start sperren',
+  );
+});
+
+test('Autobahn auf der fertigen Route wird gemeldet', () => {
+  const bahn = destination(START, 0, 3000);
+  const roads = [{ point: bahn, highway: 'motorway', name: 'A10', toll: false }];
+  const drauf = [destination(START, 0, 2800), destination(START, 0, 3200)];
+  assert.deepEqual(autobahnenNear(drauf, roads), ['A10']);
+
+  const daneben = [destination(START, 180, 2800), destination(START, 180, 3200)];
+  assert.deepEqual(autobahnenNear(daneben, roads), [], 'kein Fehlalarm abseits');
+
+  const ohneNamen = [{ point: bahn, highway: 'trunk', name: null, toll: false }];
+  assert.deepEqual(autobahnenNear(drauf, ohneNamen), ['Schnellstraße']);
 });

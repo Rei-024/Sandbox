@@ -116,7 +116,27 @@ export class RoadGraph {
    * gibt -- getrennte Netzteile sind im Gebirge die Regel, nicht die
    * Ausnahme.
    */
-  weg(vonKey, nachKey) {
+  /**
+   * Knoten, die in einer Sperrzone liegen. [lon, lat, radius] je Zone --
+   * dasselbe Format, das BRouter entgegennimmt.
+   */
+  gesperrteKnoten(nogos) {
+    const raus = new Set();
+    if (!nogos?.length) return raus;
+    for (const k of this.keys) {
+      const p = this.punkte.get(k);
+      for (const [lon, lat, radius] of nogos) {
+        if (distance(p, [lon, lat]) <= radius) {
+          raus.add(k);
+          break;
+        }
+      }
+    }
+    return raus;
+  }
+
+  weg(vonKey, nachKey, gesperrt = null) {
+    if (gesperrt?.size && (gesperrt.has(vonKey) || gesperrt.has(nachKey))) return null;
     if (vonKey === nachKey) return [this.punkte.get(vonKey)];
     const dist = new Map([[vonKey, 0]]);
     const vor = new Map();
@@ -129,7 +149,7 @@ export class RoadGraph {
       fertig.add(k);
       if (k === nachKey) break;
       for (const [n, kosten] of this.nachbarn.get(k) ?? []) {
-        if (fertig.has(n)) continue;
+        if (fertig.has(n) || gesperrt?.has(n)) continue;
         const neu = d + kosten;
         if (neu < (dist.get(n) ?? Infinity)) {
           dist.set(n, neu);

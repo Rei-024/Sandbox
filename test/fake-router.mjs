@@ -62,6 +62,7 @@ export class FakeRouter {
     this.zuVielePunkte = 0;
     this.calls = 0;
     this.rejections = 0;
+    this.sperrenGefallen = 0;
     this.provider = 'fake';
   }
 
@@ -93,7 +94,24 @@ export class FakeRouter {
     };
   }
 
-  async route(points) {
+  async route(points, { nogos = [] } = {}) {
+    try {
+      return await this.#fahre(points, nogos);
+    } catch (err) {
+      // Denselben Rueckfall wie der echte BRouter-Adapter: machen die
+      // Sperrzonen eine Route unmoeglich, lieber eine Route mit Maut oder
+      // Autobahn als gar keine. Ohne das misst der Pruefstand einen
+      // Ausfall, den es in der App nicht gibt.
+      if (nogos.length && err.kind === 'unreachable') {
+        this.sperrenGefallen++;
+        const route = await this.#fahre(points, []);
+        return { ...route, tollBlockLifted: true };
+      }
+      throw err;
+    }
+  }
+
+  async #fahre(points, nogos) {
     this.calls++;
     const grenze = this.echterGrenzwert ?? this.maxPoints;
     if (points.length > grenze) {
@@ -132,10 +150,13 @@ export class FakeRouter {
       if (inValley) path.push(points[i - 1]);
     }
 
+    // Sperrzonen gelten nur auf dem echten Graphen -- ohne Netz gibt es
+    // nichts, um das man herumfahren koennte.
+    const gesperrt = this.graph ? this.graph.gesperrteKnoten(nogos) : null;
     const coords = [];
     for (let i = 1; i < path.length; i++) {
       const seg = this.graph
-        ? this.#graphSegment(path[i - 1], path[i], i)
+        ? this.#graphSegment(path[i - 1], path[i], i, gesperrt)
         : this.#segment(path[i - 1], path[i]);
       coords.push(...(i === 1 ? seg : seg.slice(1)));
     }
@@ -151,10 +172,10 @@ export class FakeRouter {
   }
 
   /** Ein Abschnitt entlang des echten Netzes. */
-  #graphSegment(a, b, section) {
+  #graphSegment(a, b, section, gesperrt) {
     const va = this.graph.naechster(a);
     const vb = this.graph.naechster(b);
-    const pfad = va.key && vb.key ? this.graph.weg(va.key, vb.key) : null;
+    const pfad = va.key && vb.key ? this.graph.weg(va.key, vb.key, gesperrt) : null;
     if (!pfad) {
       this.rejections++;
       const info = classifyBRouterMessage(`target island detected for section ${section}`);

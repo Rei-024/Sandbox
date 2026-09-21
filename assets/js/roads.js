@@ -27,6 +27,27 @@ export const OVERPASS_ENDPOINTS = [
 export const ROAD_CLASSES = ['primary', 'secondary', 'tertiary', 'unclassified', 'residential'];
 
 /**
+ * Strassen, die niemand aus Spass faehrt: Autobahn und Schnellstrasse.
+ *
+ * Sie sind *nicht* Teil von ROAD_CLASSES -- auf sie wird nie ein Wegpunkt
+ * gezogen. Abgefragt werden sie trotzdem, denn um sie zu vermeiden, muss man
+ * erst einmal wissen, wo sie liegen. Genau daran hat es gefehlt: das
+ * Haekchen "Autobahn vermeiden" hat bei BRouter nichts bewirkt, weil BRouter
+ * ueber die URL nur einen Profilnamen entgegennimmt -- und die App gar keine
+ * Autobahndaten hatte, um ihm Sperrzonen mitzugeben.
+ */
+export const AUTOBAHN_CLASSES = ['motorway', 'motorway_link', 'trunk', 'trunk_link'];
+
+/**
+ * Wie nah an einem Autobahn-Mittelpunkt gilt als "darauf"?
+ *
+ * Kleiner als bei der Maut: eine Autobahn hat im Tal oft die Bundesstrasse
+ * als direkte Nachbarin. Ein zu weiter Sperrkreis nimmt die mit -- und dann
+ * ist das Tal dicht, statt die Autobahn gemieden.
+ */
+export const AUTOBAHN_RADIUS_M = 80;
+
+/**
  * Wie nah an einem bekannten Mautstrassen-Mittelpunkt gilt als "darauf".
  *
  * Derselbe Wert fuer Sperrkreis und Warnung: waere die Warnschwelle weiter
@@ -42,13 +63,14 @@ const CLASS_RANK = Object.fromEntries(ROAD_CLASSES.map((c, i) => [c, i]));
  * einen Mittelpunkt statt der ganzen Geometrie -- das haelt die Antwort klein
  * genug fuers Mobilnetz.
  */
-export function buildOverpassQuery(centers, radiusM, limit = 2000) {
+export function buildOverpassQuery(centers, radiusM, limit = 2000, { mitAutobahn = true } = {}) {
   const orte = (Array.isArray(centers[0]) ? centers : [centers]).slice(0, 16);
   const r = Math.round(radiusM);
+  const klassen = mitAutobahn ? [...ROAD_CLASSES, ...AUTOBAHN_CLASSES] : ROAD_CLASSES;
   const klauseln = orte
     .map(
       (c) =>
-        `way["highway"~"^(${ROAD_CLASSES.join('|')})$"]` +
+        `way["highway"~"^(${klassen.join('|')})$"]` +
         `["access"!~"^(private|no|customers)$"]` +
         `["motor_vehicle"!~"^(private|no)$"]` +
         `(around:${r},${c[1].toFixed(5)},${c[0].toFixed(5)});`,
@@ -67,7 +89,8 @@ export function parseOverpassRoads(json) {
   for (const el of json?.elements ?? []) {
     const c = el.center ?? (el.lat != null ? { lat: el.lat, lon: el.lon } : null);
     const highway = el.tags?.highway;
-    if (!c || !highway || !(highway in CLASS_RANK)) continue;
+    if (!c || !highway) continue;
+    if (!(highway in CLASS_RANK) && !AUTOBAHN_CLASSES.includes(highway)) continue;
     roads.push({
       point: [c.lon, c.lat],
       highway,
@@ -77,6 +100,9 @@ export function parseOverpassRoads(json) {
   }
   return roads;
 }
+
+/** Autobahn oder Schnellstrasse? */
+export const istAutobahn = (road) => AUTOBAHN_CLASSES.includes(road?.highway);
 
 /**
  * Aufschlag in Metern, wenn die Strassenklasse nicht zum Wunsch passt.
@@ -112,6 +138,9 @@ export function snapWaypoints(
     let best = null;
     let bestCost = Infinity;
     for (const road of roads) {
+      // Auf eine Autobahn wird nie ein Wegpunkt gezogen -- sie steht nur in
+      // der Liste, damit man weiss, wo sie liegt.
+      if (istAutobahn(road)) continue;
       if (avoidToll && road.toll) continue;
       const d = distance(wp, road.point);
       if (d > maxSnapM) continue;
@@ -134,6 +163,7 @@ export function snapWaypoints(
     let naechste = null;
     let naechsterAbstand = Infinity;
     for (const road of roads) {
+      if (istAutobahn(road)) continue;
       if (avoidToll && road.toll) continue;
       if (taken.some((t) => distance(t, road.point) < 400)) continue;
       const d = distance(wp, road.point);
@@ -236,6 +266,51 @@ export function tollNogos(
     maut = maut.sort((a, b) => naehe(a) - naehe(b));
   }
   return maut.slice(0, limit).map((r) => [r.point[0], r.point[1], radiusM]);
+}
+
+/**
+ * Autobahnen als Sperrzonen.
+ *
+ * Derselbe Handgriff wie bei der Maut, mit einer zusaetzlichen Vorsicht: eine
+ * Autobahn hat im Tal oft die Bundesstrasse als direkte Nachbarin. Liegt eine
+ * erlaubte Strasse innerhalb des Sperrkreises, wird dort *nicht* gesperrt --
+ * sonst ist das Tal dicht statt die Autobahn gemieden, und uebrig bleibt gar
+ * keine Route.
+ *
+ * Dass von jedem Weg nur ein Mittelpunkt bekannt ist, ist hier kein Nachteil:
+ * OpenStreetMap zerlegt eine Autobahn in viele kurze Wege, die Mittelpunkte
+ * liegen also dicht genug, um sie als Durchfahrt unbrauchbar zu machen.
+ */
+export function autobahnNogos(
+  roads,
+  { radiusM = AUTOBAHN_RADIUS_M, limit = 40, keepClear = [], keepClearM = 900 } = {},
+) {
+  const punkte = keepClear.filter(Boolean);
+  const erlaubt = roads.filter((r) => !istAutobahn(r));
+  let bahn = roads.filter(istAutobahn);
+  // Keine Sperre, wo sie eine erlaubte Strasse mitnehmen wuerde.
+  bahn = bahn.filter((r) => !erlaubt.some((e) => distance(e.point, r.point) < radiusM));
+  if (punkte.length) {
+    bahn = bahn.filter((r) => punkte.every((p) => distance(p, r.point) > keepClearM));
+    const naehe = (r) => Math.min(...punkte.map((p) => distance(p, r.point)));
+    bahn = bahn.sort((a, b) => naehe(a) - naehe(b));
+  }
+  return bahn.slice(0, limit).map((r) => [r.point[0], r.point[1], radiusM]);
+}
+
+/** Welche Autobahnen beruehrt die fertige Route? */
+export function autobahnenNear(coords, roads, { thresholdM = AUTOBAHN_RADIUS_M, sampleM = 100 } = {}) {
+  const bahn = roads.filter(istAutobahn);
+  if (!bahn.length) return [];
+  const treffer = new Set();
+  for (const p of resample(coords, sampleM)) {
+    for (const road of bahn) {
+      if (distance(p, road.point) < thresholdM) {
+        treffer.add(road.name ?? (road.highway.startsWith('trunk') ? 'Schnellstraße' : 'Autobahn'));
+      }
+    }
+  }
+  return [...treffer];
 }
 
 /** Schluessel fuer den Zwischenspeicher: grob gerundet, damit er auch greift. */

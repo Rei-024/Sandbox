@@ -127,9 +127,12 @@ export class BRouterAdapter {
     // BRouter nimmt ueber die URL nur einen Profilnamen entgegen -- die
     // Strassenwahl laesst sich also nur ueber das Profil steuern, nicht
     // punktgenau pro Anfrage. Sperrzonen (nogos) gehen dagegen mit, und
-    // damit laesst sich Maut gezielt umfahren -- ohne zweiten Dienst.
+    // damit lassen sich Maut und Autobahn gezielt umfahren -- ohne zweiten
+    // Dienst und ohne eine zusaetzliche Anfrage.
     return {
-      avoidMotorway: 'profile',
+      // Autobahn und Maut gehen beide ueber Sperrzonen: Overpass sagt, wo sie
+      // liegen, BRouter faehrt drumherum.
+      avoidMotorway: 'nogo',
       avoidUnpaved: 'profile',
       avoidToll: 'nogo',
       roundTrip: false,

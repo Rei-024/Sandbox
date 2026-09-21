@@ -18,6 +18,8 @@ import {
 } from './geo.js';
 import { generateRoutes, mulberry32, targetDistanceM } from './generator.js';
 import {
+  autobahnNogos,
+  autobahnenNear,
   fetchRoadNetwork,
   networkCacheKey,
   snapWaypoints,
@@ -488,8 +490,17 @@ async function run() {
       // Overpass weiß, wo die Mautstraßen sind; BRouter weiß, wie man einen
       // Ort umfährt. Zusammen ergibt das echtes Maut-Meiden ohne zweiten
       // Dienst und ohne eine einzige zusätzliche Anfrage.
+      const frei = [request.start, request.end];
       if (request.avoidToll) {
-        request.nogos = tollNogos(roads, { keepClear: [request.start, request.end] });
+        request.nogos = tollNogos(roads, { keepClear: frei });
+      }
+      // Dasselbe für die Autobahn. Das Häkchen "Autobahn vermeiden" hat bei
+      // BRouter bis hierher nichts bewirkt: BRouter nimmt über die URL nur
+      // einen Profilnamen entgegen, und car-eco fährt Autobahn. Sperrzonen
+      // nimmt es dagegen entgegen -- es fehlten nur die Daten, wo die
+      // Autobahnen liegen.
+      if (request.avoidMotorway) {
+        request.nogos = [...request.nogos, ...autobahnNogos(roads, { keepClear: frei })];
       }
       snap = (waypoints) =>
         snapWaypoints(waypoints, roads, {
@@ -530,6 +541,7 @@ async function run() {
       ...warnings,
       ...(router.notices ?? []),
       ...mautHinweis(best),
+      ...autobahnHinweis(best),
       ...richtungsHinweis(best),
       ...aehnlichkeitsHinweis(candidates),
     ];
@@ -622,6 +634,23 @@ function mautHinweis(candidate) {
     ? 'Ohne sie war hier keine Route möglich.'
     : 'Die Sperrzonen greifen nur dort, wo die Straßendaten die Maut kennen.';
   return [`Die Route führt möglicherweise über eine Mautstraße (${namen.slice(0, 3).join(', ')}). ${grund}`];
+}
+
+/**
+ * Faehrt die fertige Route ueber eine Autobahn?
+ *
+ * Wie beim Maut-Hinweis gilt: bekannt ist je Weg nur ein Mittelpunkt, nicht
+ * sein Verlauf. Gemeldet wird deshalb, was gemessen ist -- nicht, was die
+ * Sperrzonen versprochen haben.
+ */
+function autobahnHinweis(candidate) {
+  if (!state.settings.avoidMotorway || !state.roads?.length) return [];
+  const namen = autobahnenNear(candidate.coords, state.roads);
+  if (!namen.length) return [];
+  return [
+    `Die Route berührt ${namen.slice(0, 3).join(', ')}. ` +
+      'Ganz ließ sich die Autobahn hier nicht umfahren.',
+  ];
 }
 
 /**

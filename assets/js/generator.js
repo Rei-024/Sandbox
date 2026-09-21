@@ -32,6 +32,8 @@ import {
   overlapDetail,
   similarity,
   startRevisits,
+  toDeg,
+  toRad,
 } from './geo.js';
 
 const MAX_ITERATIONS = 3; // Routing-Anfragen je Variante
@@ -40,7 +42,7 @@ const REQUEST_GAP_MS = 250; // schont die oeffentlichen Server
 const MAX_REPAIRS_TOTAL = 12; // Zusatzanfragen fuer unerreichbare Wegpunkte, je Suche
 const MAX_REPAIRS_PER_VARIANT = 4; // damit ein zaeher Fall nicht alle Varianten auffrisst
 const MAX_REPAIRS_PER_CALL = 3;
-const MAX_TRIES_PER_VARIANT = 5; // Routing-Anfragen je Variante, ohne Reparaturen
+const MAX_TRIES_PER_VARIANT = 6; // Routing-Anfragen je Variante, ohne Reparaturen
 const SPUR_LIMIT = 0.12; // ab hier lohnt es, gegen Stichstrassen vorzugehen
 const SPUR_DRINGEND = 0.08; // so weit darueber ist die Runde auch mit perfekter Zeit unbrauchbar
 const FESTGEFAHREN = 0.04;
@@ -56,7 +58,9 @@ const MAX_SPUR_FIXES = 2;
  */
 const SACKTAL = 0.3;
 /** Wie oft darf die Schleife komplett neu gelegt werden? */
-const MAX_RING_NEU = 2;
+const MAX_RING_NEU = 3;
+/** Wie weit darf sie dabei von einer gewuenschten Richtung abweichen? */
+const MAX_DREHUNG_FEST = 45;
 
 /** Kleiner deterministischer Zufallsgenerator, damit "neu wuerfeln" reproduzierbar ist. */
 export function mulberry32(seed) {
@@ -161,6 +165,33 @@ function ringWaypoints(start, radiusM, curviness, bearing0, rng, maxCount = 99, 
     points.push(destination(mitte, angle, Math.max(500, radius)));
   }
   return points;
+}
+
+/**
+ * Von welcher Seite muss die Schleife weg?
+ *
+ * Wurde hin und zurueck gefahren, liegen die doppelten Punkte alle in
+ * derselben Himmelsrichtung -- im Sacktal. Die neue Schleife setzt
+ * gegenueber an. Zurueckgegeben wird die noetige *Zusatzdrehung* gegenueber
+ * der bisherigen Ausrichtung, nicht die Richtung selbst.
+ */
+function wegVomSacktal(start, doppelt, bisher) {
+  if (!doppelt?.length) return null;
+  // Mittlere Richtung als Vektor, nicht als Zahlenmittel: 350 und 10 Grad
+  // mitteln sich sonst zu 180 -- also genau falsch herum.
+  let x = 0;
+  let y = 0;
+  for (const p of doppelt) {
+    if (distance(start, p) < 500) continue;
+    const b = toRad(bearingBetween(start, p));
+    x += Math.cos(b);
+    y += Math.sin(b);
+  }
+  if (x === 0 && y === 0) return null;
+  const sacktal = (toDeg(Math.atan2(y, x)) + 360) % 360;
+  const gegenueber = sacktal + 180;
+  // Als Zusatzdrehung ausdruecken, auf +-180 normiert.
+  return ((((gegenueber - bisher) % 360) + 540) % 360) - 180;
 }
 
 /**
@@ -724,7 +755,13 @@ async function buildLoop({
       // ist. (Kleiner legen war der naheliegende Griff und hat das
       // Doppeltfahren im Pruefstand von 32 auf 43 Prozent getrieben.)
       radius *= 1.3;
-      drehung += bearing0Fest ? 18 : 61;
+      // Und zwar weg von dort, wo gerade hin und zurueck gefahren wurde.
+      // Blind weiterdrehen trifft das Sacktal beim naechsten Versuch
+      // genauso gut wie beim ersten; die doppelt gefahrenen Punkte sagen,
+      // wo nichts zu holen ist.
+      const raus = wegVomSacktal(start, overlapDetail(route.coords).repeated, bearing0 + drehung);
+      const spielraum = bearing0Fest ? MAX_DREHUNG_FEST : 180;
+      drehung = clamp(raus ?? drehung + 61, -spielraum, spielraum);
       waypoints = setzeRing();
       continue;
     }

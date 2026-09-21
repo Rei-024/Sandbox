@@ -107,6 +107,29 @@ her«).
 Wird am Ende doch eine Acht daraus, steht sie im Steckbrief: »unterwegs einmal
 wieder am Start vorbei«. Im Gebirge ist sie manchmal das Beste, was es gibt.
 
+### Autobahn vermeiden – und warum das Häkchen lange nichts tat
+
+BRouter nimmt über die URL nur einen Profilnamen entgegen. Die Straßenwahl
+lässt sich damit nicht pro Anfrage steuern, und `car-eco` fährt Autobahn. Das
+Häkchen »Autobahn vermeiden« hatte deshalb bei BRouter **keinerlei Wirkung** –
+aufgefallen ist das erst, als eine Route sichtbar über die A10 führte.
+
+Sperrzonen nimmt BRouter dagegen entgegen. Es fehlten nur die Daten: Autobahnen
+standen gar nicht in der Overpass-Abfrage. Jetzt schon – aber getrennt von den
+fahrbaren Straßen: auf eine Autobahn wird nie ein Wegpunkt gezogen, sie ist nur
+dafür da, dass die App weiß, wo sie liegt.
+
+Eine Vorsicht dabei: im Tal hat eine Autobahn oft die Bundesstraße als direkte
+Nachbarin. Liegt eine erlaubte Straße innerhalb des Sperrkreises, wird dort
+**nicht** gesperrt – sonst ist das Tal dicht statt die Autobahn gemieden. Der
+Sperrkreis ist mit 80 m auch enger als bei der Maut (150 m).
+
+Dass von jedem Weg nur ein Mittelpunkt bekannt ist, stört hier wenig:
+OpenStreetMap zerlegt eine Autobahn in viele kurze Wege, die Mittelpunkte
+liegen also dicht genug, um sie als Durchfahrt unbrauchbar zu machen.
+
+Bleibt am Ende doch ein Stück Autobahn übrig, sagt die App es.
+
 ### Warum das Straßennetz nötig ist
 
 Wegpunkte geometrisch auf einen Kreis zu würfeln funktioniert nur, wo überall
@@ -276,7 +299,7 @@ außen gehen nur die Anfragen an den gewählten Routing-Dienst, an Nominatim
 ## Tests
 
 ```bash
-npm test                                            # 107 Unit-Tests, ohne Netz
+npm test                                            # 109 Unit-Tests, ohne Netz
 node --test test/stress.mjs                         # 300 Zufallsläufe gegen Zufallswelten
 NODE_PATH=$(npm root -g) node test/browser/smoke.mjs # kompletter Ablauf im Browser
 ```
@@ -313,12 +336,36 @@ vorher.
 
 Gemessen wird deshalb auch, was den Fahrer stört und keinen Lauf abstürzen
 lässt: Anteil doppelt gefahrener Strecke, Anteil Achten statt Runden, und um
-wie viel Grad die gefahrene Richtung die gewünschte verfehlt. Für alle drei
-stehen Obergrenzen im Prüfstand – sie sind eine Sperre gegen Rückfall, kein
-Ziel.
+wie viel Grad die gefahrene Richtung die gewünschte verfehlt. Für alle vier
+Kennzahlen stehen Obergrenzen im Prüfstand – sie sind eine Sperre gegen
+Rückfall, kein Ziel.
 
-Sechs echte Fehler sind so gefunden worden, die von Hand niemand gesehen
-hätte.
+#### Eine Kennzahl, die springt, misst die Würfel
+
+Zwei Fallen haben hier erst einmal falsche Schlüsse produziert, beide wert,
+aufgeschrieben zu werden:
+
+**Geteilte Zufallsströme.** Anfrage und Weltenbau zogen aus demselben Strom.
+Eine zusätzliche Zeile im Weltenbau verschiebt dann alle späteren Zufallszahlen
+– zwei Messungen vergleichen unterschiedliche Welten statt unterschiedlicher
+Verfahren. Ein Zusatz, der eine Kennzahl scheinbar von 18 auf 73 Prozent trieb,
+hatte in Wahrheit nur die Karten neu gemischt. Welt und Anfrage haben jetzt
+getrennte Ströme.
+
+**Tail-Werte auf kleiner Stichprobe.** Das P90 des Doppeltfahrens schwankt über
+rund achtzig Gebirgsrunden allein durch die Saat zwischen 9 und 26 Prozent.
+Anteile und Mediane bleiben stabil. Die Schranken hängen deshalb an Anteilen,
+nicht an P90 – nachprüfbar mit `SAAT=1 node test/stress.mjs`.
+
+Und die Alpenwelt garantiert mindestens einen Pass zwischen zwei Talköpfen.
+Ohne ihn gibt es dort überhaupt keine Runde, und der Prüfstand misst dann, ob
+die Würfel eine lösbare Gegend ausgespuckt haben – nicht, ob die App sie löst.
+
+Sieben echte Fehler sind so gefunden worden, die von Hand niemand gesehen
+hätte – und eine falsche Zusicherung: »nie mehr als 50 % doppelt« behauptete
+eine Schranke, die das Maß gar nicht hat (`overlapDetail` zählt jeden
+Wiederbesuch, ein dreifach befahrener Abschnitt kommt also legitim darüber).
+Sie ist jetzt eine gezählte Qualitätszahl statt einer Zusicherung.
 
 ## Aufbau
 
