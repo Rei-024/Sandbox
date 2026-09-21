@@ -57,6 +57,7 @@ export class Sheet {
 
   apply() {
     this.el.dataset.state = this.state;
+    this.handle.setAttribute('aria-expanded', String(this.state !== 'peek'));
     if (this.istSeitenspalte) {
       this.el.style.removeProperty('--sheet-h');
       return;
