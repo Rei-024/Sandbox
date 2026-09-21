@@ -69,11 +69,26 @@ test('Ein weiter Umweg fuer eine groessere Strasse lohnt nicht', () => {
   assert.deepEqual(snapWaypoints([wunsch], roads, { curviness: 1 })[0], roads[0].point);
 });
 
-test('snapWaypoints laesst zu weit entfernte Wuensche stehen', () => {
+test('Ist nichts in der Naehe, wird die naechstgelegene Strasse genommen', () => {
+  // Den Wunschpunkt im Nirgendwo stehen zu lassen hiesse, den Router
+  // sehenden Auges auf einen unerreichbaren Punkt zu schicken.
   const wunsch = destination(START, 90, 12000);
   const weit = [{ point: destination(wunsch, 0, 20000), highway: 'tertiary' }];
-  assert.deepEqual(snapWaypoints([wunsch], weit, { maxSnapM: 6000 })[0], wunsch);
+  assert.deepEqual(snapWaypoints([wunsch], weit, { maxSnapM: 6000 })[0], weit[0].point);
   assert.deepEqual(snapWaypoints([wunsch], [], {})[0], wunsch, 'ohne Daten bleibt alles wie es war');
+});
+
+test('Die Notfallwahl haelt sich trotzdem an Maut und Doppelbelegung', () => {
+  const wunsch = destination(START, 90, 12000);
+  const roads = [
+    { point: destination(wunsch, 0, 20000), highway: 'tertiary', toll: true },
+    { point: destination(wunsch, 0, 26000), highway: 'tertiary', toll: false },
+  ];
+  assert.deepEqual(
+    snapWaypoints([wunsch], roads, { maxSnapM: 6000, avoidToll: true })[0],
+    roads[1].point,
+    'auch in der Not keine Mautstraße',
+  );
 });
 
 test('snapWaypoints setzt nicht zwei Wegpunkte auf dieselbe Strasse', () => {

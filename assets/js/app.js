@@ -6,8 +6,16 @@
  * routers.js -- hier passiert nur Bedienung.
  */
 
-import { clamp, cumulativeDistance, overlapPercent } from './geo.js';
-import { generateRoutes, targetDistanceM } from './generator.js';
+import {
+  bearing,
+  clamp,
+  cumulativeDistance,
+  destination,
+  distance,
+  midpoint,
+  overlapPercent,
+} from './geo.js';
+import { generateRoutes, mulberry32, targetDistanceM } from './generator.js';
 import {
   fetchRoadNetwork,
   networkCacheKey,
@@ -437,6 +445,16 @@ async function run() {
     seed: state.seed,
   };
 
+  // Bei einer Einwegstrecke ohne Wunschrichtung wird hier eine festgelegt.
+  // Sonst wüsste niemand, entlang welcher Achse das Straßennetz zu laden
+  // ist – und die Varianten führten in alle Himmelsrichtungen auseinander.
+  if (request.mode === 'oneway' && request.bearing == null && !request.end) {
+    request.bearing = Math.floor(mulberry32(state.seed)() * 8) * 45;
+    state.gewuerfelteRichtung = request.bearing;
+  } else {
+    state.gewuerfelteRichtung = null;
+  }
+
   const netzWarnungen = [];
   let snap = (waypoints) => waypoints;
   if (state.settings.snapToRoads) {
@@ -544,15 +562,60 @@ function mautHinweis(candidate) {
  * waere nutzlos, alles weiter nur Ballast.
  */
 async function loadRoadNetwork(request, signal) {
-  const ring = targetDistanceM(request.durationMin, request.curviness) / (2 * Math.PI * 1.25);
-  const radius = clamp(ring * 1.7, 6000, 45000);
-  const key = networkCacheKey(request.start, radius);
+  const { centers, radiusM } = abfrageGebiet(request);
+  const key = networkCacheKey(centers, radiusM);
 
   if (roadCache.has(key)) return roadCache.get(key);
   setStatus('Straßennetz der Gegend laden …');
-  const roads = await fetchRoadNetwork(request.start, radius, { signal });
+  const roads = await fetchRoadNetwork(centers, radiusM, { signal });
   roadCache.set(key, roads);
   return roads;
+}
+
+/**
+ * Wo muss das Straßennetz geladen werden?
+ *
+ * Für eine Runde reicht eine Scheibe um den Start. Eine Einwegstrecke führt
+ * dagegen weit weg – vier Stunden sind gut 150 km Luftlinie. Eine Scheibe
+ * mit diesem Radius wäre riesig; ein Schlauch entlang der Fahrtrichtung
+ * deckt dieselbe Strecke mit einem Bruchteil der Fläche ab.
+ */
+export function abfrageGebiet(request) {
+  const ziel = targetDistanceM(request.durationMin, request.curviness);
+
+  if (request.mode === 'loop') {
+    const ring = ziel / (2 * Math.PI * 1.25);
+    return { centers: [request.start], radiusM: clamp(ring * 1.7, 6000, 45000) };
+  }
+
+  // Der Schlauch wird so lang geladen, als waeren die Strassen schnurgerade.
+  // Wie weit der Endpunkt am Ende wirklich liegt, haengt davon ab, wie krumm
+  // sie sind; sind sie gerader als angenommen, muss die Suche die Reichweite
+  // vergroessern und findet dann nur Leere. Grosszuegig zu laden kostet ein
+  // paar Kilobyte – ein zu kurzer Schlauch kostete in der Messung ein
+  // Drittel der Fahrzeit.
+  const endpunkt = request.end ?? destination(request.start, request.bearing ?? 0, ziel / 1.02);
+  const spanne = Math.max(3000, distance(request.start, endpunkt));
+
+  // Liegt das Ziel viel naeher als die Wunschdauer verlangt, holt der
+  // Generator aus wie bei einer Runde -- dann braucht es auch eine Scheibe
+  // um die Mitte zwischen Start und Ziel, keinen Schlauch dorthin.
+  if (request.end && spanne < ziel * 0.55) {
+    const ring = ziel / (2 * Math.PI * 1.25);
+    return {
+      centers: [midpoint(request.start, request.end)],
+      radiusM: clamp(Math.max(ring * 1.7, spanne), 6000, 45000),
+    };
+  }
+  const schritte = clamp(Math.ceil(spanne / 18000), 1, 8);
+  const kurs = bearing(request.start, endpunkt);
+  const centers = [request.start];
+  for (let i = 1; i <= schritte; i++) {
+    centers.push(destination(request.start, kurs, (spanne * i) / schritte));
+  }
+  // Der Schlauch muss den Faecher der Varianten und die seitliche Auslenkung
+  // fassen, nicht nur die Achse.
+  return { centers, radiusM: clamp(Math.max(spanne / schritte, spanne * 0.1 + 12000), 12000, 30000) };
 }
 
 function surprise() {
@@ -716,6 +779,7 @@ function describe(c) {
   // was angeklickt wurde. Auseinanderlaufen darf das, verschwiegen wird es nicht.
   // Die Wunschzeit deutlich verfehlt? Das gehoert in die erste Zeile, nicht
   // versteckt in die Kennzahl darunter.
+  if (state.gewuerfelteRichtung != null) parts.push(`Richtung ${himmelsrichtung(state.gewuerfelteRichtung)}`);
   const zeitAbweichung = (c.durationMin - state.settings.durationMin) / state.settings.durationMin;
   if (zeitAbweichung > 0.25) parts.push('kürzer war hier keine Runde zu finden');
   else if (zeitAbweichung < -0.25) parts.push('länger gab die Gegend nicht her');
@@ -775,6 +839,9 @@ function showAlert(message, kind = 'error') {
 const hideAlert = () => {
   $('alert').hidden = true;
 };
+
+const RICHTUNGEN = ['Norden', 'Nordosten', 'Osten', 'Südosten', 'Süden', 'Südwesten', 'Westen', 'Nordwesten'];
+export const himmelsrichtung = (grad) => RICHTUNGEN[Math.round(((grad % 360) + 360) % 360 / 45) % 8];
 
 export function formatDuration(minutes) {
   const total = Math.round(minutes);

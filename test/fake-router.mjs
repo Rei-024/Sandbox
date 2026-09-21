@@ -24,7 +24,11 @@ export class FakeRouter {
    */
   constructor({
     wiggle = 0.5,
-    stepM = 120,
+    // 40 m Punktabstand wie echte Routerausgabe. Mit grober Abtastung und
+    // kraeftiger Welle lagen aufeinanderfolgende Punkte hunderte Meter
+    // auseinander -- die Geometrie war dann unrealistischer als jede
+    // Strasse und verfaelschte die Zusicherungen.
+    stepM = 40,
     islands = [],
     deadEnds = [],
     corridors = [],
@@ -139,8 +143,11 @@ export class FakeRouter {
     const len = distance(a, b);
     const steps = Math.max(2, Math.round(len / this.stepM));
     const heading = headingOf(a, b);
-    const amp = this.wiggle * Math.min(400, len * 0.08);
     const waves = Math.max(1, Math.round(len / 900));
+    const wellenlaenge = len / waves;
+    // Amplitude an die Wellenlaenge koppeln: sonst entsteht ein Zickzack,
+    // das keine Strasse je faehrt.
+    const amp = this.wiggle * Math.min(wellenlaenge / 8, len * 0.08);
     const out = [];
     for (let i = 0; i <= steps; i++) {
       const t = i / steps;

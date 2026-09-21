@@ -42,18 +42,23 @@ const CLASS_RANK = Object.fromEntries(ROAD_CLASSES.map((c, i) => [c, i]));
  * einen Mittelpunkt statt der ganzen Geometrie -- das haelt die Antwort klein
  * genug fuers Mobilnetz.
  */
-export function buildOverpassQuery(center, radiusM, limit = 2000) {
+export function buildOverpassQuery(centers, radiusM, limit = 2000) {
+  const orte = (Array.isArray(centers[0]) ? centers : [centers]).slice(0, 16);
   const r = Math.round(radiusM);
-  const lat = center[1].toFixed(5);
-  const lon = center[0].toFixed(5);
-  return (
-    `[out:json][timeout:25];` +
-    `way["highway"~"^(${ROAD_CLASSES.join('|')})$"]` +
-    `["access"!~"^(private|no|customers)$"]` +
-    `["motor_vehicle"!~"^(private|no)$"]` +
-    `(around:${r},${lat},${lon});` +
-    `out tags center ${Math.round(limit)};`
-  );
+  const klauseln = orte
+    .map(
+      (c) =>
+        `way["highway"~"^(${ROAD_CLASSES.join('|')})$"]` +
+        `["access"!~"^(private|no|customers)$"]` +
+        `["motor_vehicle"!~"^(private|no)$"]` +
+        `(around:${r},${c[1].toFixed(5)},${c[0].toFixed(5)});`,
+    )
+    .join('');
+  // Mehrere Umkreise statt einer grossen Scheibe: eine Einwegstrecke ueber
+  // vier Stunden endet gut 150 km entfernt. Eine Scheibe mit 150 km Radius
+  // waere riesig -- ein Schlauch entlang der Fahrtrichtung deckt dieselbe
+  // Strecke mit einem Bruchteil der Flaeche ab.
+  return `[out:json][timeout:25];(${klauseln});out tags center ${Math.round(limit)};`;
 }
 
 /** Overpass-Antwort auf das Noetige eindampfen. */
@@ -117,18 +122,38 @@ export function snapWaypoints(
         best = road.point;
       }
     }
-    if (best) taken.push(best);
-    return best ?? wp;
+    if (best) {
+      taken.push(best);
+      return best;
+    }
+
+    // Nichts im Umkreis? Dann lieber die naechstgelegene Strasse ueberhaupt
+    // als den Wunschpunkt stehen zu lassen. Wo keine Strasse ist, kann kein
+    // Router hinfahren -- der Punkt waere sicher unerreichbar, und die
+    // Reparatur muesste ihn erst muehsam wieder einfangen.
+    let naechste = null;
+    let naechsterAbstand = Infinity;
+    for (const road of roads) {
+      if (avoidToll && road.toll) continue;
+      if (taken.some((t) => distance(t, road.point) < 400)) continue;
+      const d = distance(wp, road.point);
+      if (d < naechsterAbstand) {
+        naechsterAbstand = d;
+        naechste = road.point;
+      }
+    }
+    if (naechste) taken.push(naechste);
+    return naechste ?? wp;
   });
 }
 
 /** Strassennetz rund um einen Punkt holen. Wirft, wenn kein Server antwortet. */
 export async function fetchRoadNetwork(
-  center,
+  centers,
   radiusM,
   { signal, endpoints = OVERPASS_ENDPOINTS, limit = 2000 } = {},
 ) {
-  const query = buildOverpassQuery(center, radiusM, limit);
+  const query = buildOverpassQuery(centers, radiusM, limit);
   let lastError = null;
 
   for (const endpoint of endpoints) {
@@ -214,5 +239,10 @@ export function tollNogos(
 }
 
 /** Schluessel fuer den Zwischenspeicher: grob gerundet, damit er auch greift. */
-export const networkCacheKey = (center, radiusM) =>
-  `${center[1].toFixed(2)},${center[0].toFixed(2)},${Math.round(radiusM / 2000)}`;
+export const networkCacheKey = (centers, radiusM) => {
+  const orte = Array.isArray(centers[0]) ? centers : [centers];
+  return (
+    orte.map((c) => `${c[1].toFixed(2)},${c[0].toFixed(2)}`).join(';') +
+    `@${Math.round(radiusM / 2000)}`
+  );
+};

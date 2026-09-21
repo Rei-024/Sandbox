@@ -56,6 +56,11 @@ export function destination(origin, brg, distM) {
   return [((toDeg(lon2) + 540) % 360) - 180, toDeg(lat2)];
 }
 
+/** Punkt in der Mitte zwischen zwei Orten. */
+export function midpoint(a, b) {
+  return destination(a, bearing(a, b), distance(a, b) / 2);
+}
+
 /** Kleinster Winkel zwischen zwei Kursen, immer 0..180. */
 export function angleDiff(a, b) {
   const d = Math.abs(((b - a + 540) % 360) - 180);

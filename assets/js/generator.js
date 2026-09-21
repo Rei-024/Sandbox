@@ -28,6 +28,7 @@ import {
   lineLength,
   estimateSpeedKmh,
   levelToDegPerKm,
+  midpoint,
   overlapDetail,
   similarity,
 } from './geo.js';
@@ -314,6 +315,10 @@ export async function generateRoutes(
   const candidates = [];
   const failures = [];
   const grundrichtung = mulberry32(seed)() * 360;
+  const reichweite = targetDistanceM(durationMin, curviness) / 1.3;
+  const faecher =
+    mode === 'loop' ? 360 : clamp((Math.atan2(14000, reichweite) * 360) / Math.PI, 10, 70);
+  const faecherMitte = (faecher * (variants - 1)) / (2 * variants);
   const pool = { left: MAX_REPAIRS_TOTAL };
   let lastError = null;
   let requestCount = 0;
@@ -358,7 +363,16 @@ export async function generateRoutes(
     // Richtungen gleichmaessig ueber den Kreis verteilen -- auch wenn dem
     // Fahrer die Richtung egal ist. Wuerfelte jede Variante fuer sich, kamen
     // regelmaessig drei fast gleiche Runden heraus.
-    const bearing0 = (bearing ?? grundrichtung) + (v * 360) / variants;
+    // Runden duerfen in alle Richtungen starten. Einwegstrecken nicht: drei
+    // Vorschlaege in entgegengesetzte Himmelsrichtungen sind keine Auswahl,
+    // und das Strassennetz muesste dann rundum geladen werden statt nur
+    // entlang der Fahrtrichtung.
+    //
+    // Wie weit gefaechert werden darf, haengt an der Reichweite: zehn Grad
+    // sind bei einer Stunde ein Katzensprung, bei vier Stunden schon
+    // dreissig Kilometer quer. Der Fächer wird deshalb so gewaehlt, dass die
+    // Varianten im geladenen Schlauch bleiben.
+    const bearing0 = (bearing ?? grundrichtung) + (v * faecher) / variants - faecherMitte;
     // Jede Variante bekommt ihren eigenen Reparaturvorrat, sonst frisst die
     // erste in unwegsamem Gelaende alles auf und die anderen fallen aus.
     const budget = { left: Math.min(pool.left, MAX_REPAIRS_PER_VARIANT) };
@@ -708,6 +722,49 @@ async function buildOneWay({
       return out;
     }
 
+    // Braucht die Wunschdauer deutlich mehr als die direkte Verbindung,
+    // reichen seitliche Umwege nicht: detourWaypoints deckelt sie auf einen
+    // Bruchteil der Luftlinie, damit die Strecke nicht ausartet. Bei einem
+    // nahen Ziel ist dieser Deckel genau das Problem -- "vier Stunden fahren
+    // und im Nachbarort ankommen" ist dann unerreichbar.
+    //
+    // Dafuer wird ausgeholt wie bei einer Runde: ein Ring um die Mitte
+    // zwischen Start und Ziel, nur endet die Strecke eben am Ziel statt am
+    // Start.
+    if (directCandidate.durationMin < durationMin * 0.7) {
+      const detour = 1.15 + 0.22 * twisty;
+      const mitte = midpoint(start, end);
+      let radius = Math.max(
+        distance(start, end) * 0.6,
+        targetDistanceM(durationMin, curviness) / (2 * Math.PI * detour),
+      );
+
+      for (let iter = 0; iter < MAX_TRIES_PER_VARIANT - 1; iter++) {
+        onProgress({
+          variant: v + 1,
+          variants,
+          attempt: iter + 2,
+          message: `Variante ${v + 1}/${variants} – Bogen zum Ziel suchen`,
+        });
+        const { route, waypoints: used } = await routeWithRepair({
+          waypoints: snap(ringWaypoints(mitte, radius, curviness, bearing0, rng, maxWaypoints)),
+          assemble: (wps) => [start, ...wps, end],
+          anchor: start,
+          call,
+          rng,
+          budget,
+          snap,
+        });
+        const candidate = finalize(route, used, normalized, { seedBearing: bearing0 });
+        out.push(candidate);
+
+        const ratio = durationMin / Math.max(1, candidate.durationMin);
+        if (Math.abs(1 - ratio) <= TIME_TOLERANCE) break;
+        radius *= clamp(ratio, 0.6, 1.7) ** 0.9;
+      }
+      return out;
+    }
+
     let amplitude = distance(start, end) * 0.18 * (1 + twisty);
     for (let iter = 1; iter < MAX_ITERATIONS + 1; iter++) {
       onProgress({
@@ -736,20 +793,33 @@ async function buildOneWay({
     return out;
   }
 
-  // Kein Ziel: Richtung waehlen und einen Endpunkt in passender Entfernung setzen.
+  // Kein Ziel: Richtung waehlen und einen Endpunkt in passender Entfernung
+  // setzen.
   const detour = 1.2 + 0.25 * twisty;
   let reach = targetDistanceM(durationMin, curviness) / detour;
+  let auslenkungAnteil = 0.12;
+  let letzteLaenge = null;
 
-  for (let iter = 0; iter < MAX_ITERATIONS; iter++) {
+  for (let iter = 0; iter < MAX_TRIES_PER_VARIANT; iter++) {
     onProgress({
       variant: v + 1,
       variants,
       attempt: iter + 1,
       message: `Variante ${v + 1}/${variants} – Versuch ${iter + 1}`,
     });
-    const target = destination(start, bearing0, Math.max(2000, reach));
+    // Auch der Endpunkt gehoert auf eine echte Strasse. Er wurde bisher als
+    // einziger Punkt roh uebergeben -- und lag nach der ersten Justierung
+    // regelmaessig zwanzig Kilometer neben jeder Strasse, was die ganze
+    // Variante unrettbar machte. Anders als ein Wegpunkt laesst er sich
+    // nicht reparieren: er ist das Ziel.
+    const target = snap([destination(start, bearing0, Math.max(2000, reach))])[0];
+    // Seitliche Auslenkung gedeckelt: bei einer Vierstundenfahrt waeren
+    // 22 % der Reichweite gut 35 km quer zur Fahrtrichtung -- weit ausserhalb
+    // des Strassennetzes, das entlang der Achse geladen wurde.
+    const auslenkung = Math.min(reach * auslenkungAnteil * (1 + twisty), 12000);
+
     const { route, waypoints: used } = await routeWithRepair({
-      waypoints: snap(detourWaypoints(start, target, reach * 0.22 * (1 + twisty), curviness, rng, maxWaypoints)),
+      waypoints: snap(detourWaypoints(start, target, auslenkung, curviness, rng, maxWaypoints)),
       assemble: (wps) => [start, ...wps, target],
       anchor: start,
       call,
@@ -757,14 +827,34 @@ async function buildOneWay({
       budget,
       snap,
     });
-    const candidate = finalize(route, [...used, target], normalized, {
-      seedBearing: bearing0,
-    });
+    const candidate = finalize(route, [...used, target], normalized, { seedBearing: bearing0 });
     out.push(candidate);
 
     const ratio = durationMin / Math.max(1, candidate.durationMin);
     if (Math.abs(1 - ratio) <= TIME_TOLERANCE) break;
-    reach *= clamp(ratio, 0.6, 1.7) ** 0.9;
+
+    // Der Endpunkt sitzt auf einer Strasse und springt beim Nachskalieren
+    // oft auf dieselbe zurueck -- dann aendert sich die Laenge nicht mehr.
+    // Statt weiter an der Reichweite zu drehen, wird dann die seitliche
+    // Auslenkung verstellt: die verlaengert, ohne das Ziel zu verschieben.
+    const festgefahren =
+      letzteLaenge != null &&
+      Math.abs(candidate.distanceM - letzteLaenge) / letzteLaenge < FESTGEFAHREN;
+    letzteLaenge = candidate.distanceM;
+
+    if (festgefahren) {
+      auslenkungAnteil = clamp(auslenkungAnteil * (ratio > 1 ? 1.9 : 0.5), 0.03, 0.5);
+    } else {
+      // Statt gedaempft zu tasten direkt rechnen: aus der gefahrenen Strecke
+      // und der Luftlinie zum Endpunkt ergibt sich der tatsaechliche
+      // Umwegfaktor dieser Gegend, und daraus die noetige Reichweite. Das
+      // tastende Nachskalieren brauchte dafuer mehr Schritte, als eine
+      // Variante hat -- die Strecken kamen durchweg ein Fuenftel zu kurz.
+      const luftlinie = Math.max(1, distance(start, target));
+      const umweg = clamp(candidate.distanceM / luftlinie, 1.02, 2.5);
+      const gewuenschteLaenge = candidate.distanceM * ratio;
+      reach = clamp(gewuenschteLaenge / umweg, reach * 0.5, reach * 2.5);
+    }
   }
   return out;
 }

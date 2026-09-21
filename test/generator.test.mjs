@@ -332,17 +332,24 @@ test('Gleiche Fehler mehrerer Varianten werden zusammengefasst', async () => {
  */
 function talsystem(start) {
   const punkte = [];
-  const ecken = [0, 55, 130, 190, 250, 305].map((grad, i) =>
-    destination(start, grad, i % 2 ? 11000 : 14000),
-  );
   const strecke = (a, b) => {
     const schritte = Math.max(2, Math.round(distance(a, b) / 400));
     for (let s = 0; s <= schritte; s++) {
       punkte.push([a[0] + (b[0] - a[0]) * (s / schritte), a[1] + (b[1] - a[1]) * (s / schritte)]);
     }
   };
-  for (let i = 0; i < ecken.length; i++) strecke(ecken[i], ecken[(i + 1) % ecken.length]);
-  strecke(start, ecken[0]); // Zufahrt
+  // Drei Ringe mit Speichen. In der Wirklichkeit gibt es fast ueberall
+  // Strassen -- ein Netz aus zwei duennen Ringen laesst Wegpunkte ins Leere
+  // fallen, und der Test misst dann die Fixture statt die App.
+  const ring = (radius, zahl, versatz) =>
+    Array.from({ length: zahl }, (_, i) => destination(start, versatz + (360 * i) / zahl, radius));
+  const ringe = [ring(7000, 7, 10), ring(13000, 8, 30), ring(19000, 9, 0)];
+
+  for (const r of ringe) for (let i = 0; i < r.length; i++) strecke(r[i], r[(i + 1) % r.length]);
+  for (let k = 1; k < ringe.length; k++) {
+    for (let i = 0; i < ringe[k].length; i++) strecke(ringe[k - 1][i % ringe[k - 1].length], ringe[k][i]);
+  }
+  for (const p of ringe[0]) strecke(start, p);
   return punkte;
 }
 
