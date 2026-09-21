@@ -181,6 +181,27 @@ Rundkurs-Suche, fällt die App auf die eigenen Wegpunkte zurück und sagt es.
 Verrät ein Dienst seine Punktgrenze erst in der Fehlermeldung, lernt die App
 sie daraus.
 
+## Oberfläche
+
+Die Karte ist die Seite, nicht ein Kasten darauf. Alles andere schwebt darüber:
+oben der Name und der Hell/Dunkel-Schalter, rechts Standort und Nadel, über der
+Karte eine Blase für den Fortschritt.
+
+Am Handy sitzt das Bedienblatt unten und hat drei Rasten – zugeklappt bleiben
+die Zusammenfassung (Dauer, Kurvigkeit, Art) und der Startknopf stehen, halb
+offen liest man den Steckbrief und sieht die Route, ganz offen steht das volle
+Formular da. Ziehen am Griff rastet ein, Antippen schaltet weiter. Eine Raste
+ist eine **Höhe**, keine Verschiebung: so rutscht der große Knopf nie unten aus
+dem Bild. Nach dem Generieren geht das Blatt von selbst halb auf, und die Route
+wird in genau den Platz eingepasst, der daneben übrig bleibt.
+
+Ab 900 px Breite wird aus dem Blatt eine feste Seitenspalte, die Karte bleibt
+vollflächig daneben.
+
+Farben: Grau als Grundton, Orange für alles zum Anfassen, Rot für die Route und
+das Höhenprofil. Die Kartenfarben kippen bewusst **nicht** mit dem Dunkelmodus –
+eine rote Linie muss auf hellen wie dunklen Kacheln dieselbe Linie sein.
+
 ## Was die App nicht kann
 
 Ehrlichkeitshalber:
@@ -219,15 +240,25 @@ außen gehen nur die Anfragen an den gewählten Routing-Dienst, an Nominatim
 ## Tests
 
 ```bash
-npm test                                            # 102 Unit-Tests, ohne Netz
+npm test                                            # 106 Unit-Tests, ohne Netz
+node --test test/stress.mjs                         # 300 Zufallsläufe gegen Zufallswelten
 NODE_PATH=$(npm root -g) node test/browser/smoke.mjs # kompletter Ablauf im Browser
 ```
 
 Der Browser-Test startet den Server, fängt alle Netzaufrufe ab (Kacheln,
 Ortssuche, BRouter liefern simulierte Antworten) und spielt den ganzen Ablauf
 durch – Start setzen, generieren, Varianten wechseln, Höhenprofil antippen, GPX
-herunterladen, Einwegstrecke, Overpass-Ausfall, Fehlerfall. Screenshots landen in
-`test/screenshots/`. Er braucht Playwright.
+herunterladen, Einwegstrecke, Overpass-Ausfall, Fehlerfall. Dazu misst er die
+Oberfläche nach: dass die Hülle im Bildschirm festsitzt, dass am Handy der
+Startknopf auch im zugeklappten Blatt sichtbar bleibt und dass nichts waagerecht
+überläuft. Screenshots landen in `test/screenshots/`. Er braucht Playwright.
+
+Die Belastungsprobe (`test/stress.mjs`) baut zufällige Straßennetze – Ringe,
+Speichen, Sackgassen, Inseln, Mautstraßen, Höhenrelief – und lässt die App 300
+zufällige Wünsche darauf lösen. Geprüft wird nicht der Geschmack, sondern das,
+was nie passieren darf: eine Runde, die nicht am Start endet, Sprünge in der
+Geometrie, eine Längenangabe, die nicht zur Linie passt, kaputtes GPX. Drei
+echte Fehler sind so gefunden worden, die von Hand niemand gesehen hätte.
 
 ## Aufbau
 
@@ -236,6 +267,7 @@ index.html              Aufbau der Seite
 assets/css/app.css      Gestaltung, Farb-Tokens, Hell/Dunkel
 assets/js/
   app.js                Bedienung und Ablaufsteuerung
+  sheet.js              Bedienblatt am Handy: drei Rasten, ziehen und tippen
   generator.js          Wegpunkte erzeugen, nachjustieren, Varianten bewerten
   routers.js            BRouter- und GraphHopper-Adapter, Ortssuche
   roads.js              Straßennetz über Overpass, Wegpunkte aufschnappen
@@ -245,6 +277,8 @@ assets/js/
   export.js             GPX und Google-Maps-Link
   store.js              Einstellungen im Browser
 server.js               kleiner Entwicklungsserver
+test/stress.mjs         Belastungsprobe gegen zufällige Straßennetze
+test/fake-router.mjs    simulierter Routing-Dienst für die Tests
 vendor/leaflet/         Leaflet 1.9.4, mitgeliefert statt per CDN
 ```
 

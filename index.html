@@ -9,7 +9,7 @@
       content="Generiert Motorradstrecken nach Wunschdauer, Kurvigkeit und Streckenart – als Runde oder Einwegstrecke, mit GPX-Export."
     />
     <meta name="color-scheme" content="light dark" />
-    <meta name="theme-color" content="#16161a" />
+    <meta name="theme-color" content="#17171a" />
     <link rel="stylesheet" href="vendor/leaflet/leaflet.css" />
     <link rel="stylesheet" href="assets/css/app.css" />
     <link
@@ -18,233 +18,244 @@
     />
   </head>
   <body>
-    <header class="topbar">
-      <div class="brand">
-        <span class="brand__mark" aria-hidden="true">🏍️</span>
-        <span class="brand__text">
-          <strong>Kurvenjagd</strong>
-          <span>Sag mir, wie lange und wie kurvig – ich sag dir, wo du hinfährst.</span>
+    <div class="app">
+      <!-- Die Karte ist die Buehne, nicht eine Kachel unter dem Formular. -->
+      <div id="map" class="map"></div>
+
+      <header class="topbar">
+        <span class="brand">
+          <span class="brand__mark" aria-hidden="true">🏍️</span>
+          <span class="brand__name">Kurvenjagd</span>
         </span>
+        <button type="button" id="theme-toggle" class="icon-button icon-button--floating" aria-label="Hell/Dunkel umschalten">
+          <svg viewBox="0 0 24 24" aria-hidden="true" class="icon">
+            <path d="M12 3a9 9 0 1 0 9 9 7 7 0 0 1-9-9Z" />
+          </svg>
+        </button>
+      </header>
+
+      <div class="map-tools">
+        <button type="button" id="locate-btn" class="icon-button icon-button--floating" title="Aktuellen Standort verwenden">
+          <svg viewBox="0 0 24 24" aria-hidden="true" class="icon">
+            <circle cx="12" cy="12" r="3.2" />
+            <path d="M12 2v3.2M12 18.8V22M22 12h-3.2M5.2 12H2" />
+            <circle cx="12" cy="12" r="7.4" class="icon--stroke" />
+          </svg>
+          <span class="sr-only">Standort ermitteln</span>
+        </button>
+        <button type="button" id="pick-start-btn" class="icon-button icon-button--floating" title="Start auf der Karte wählen" aria-pressed="false">
+          <svg viewBox="0 0 24 24" aria-hidden="true" class="icon">
+            <path d="M12 21s7-6.4 7-11a7 7 0 1 0-14 0c0 4.6 7 11 7 11Z" class="icon--stroke" />
+            <circle cx="12" cy="10" r="2.4" />
+          </svg>
+          <span class="sr-only">Start auf der Karte wählen</span>
+        </button>
       </div>
-      <button type="button" id="theme-toggle" class="icon-button" aria-label="Hell/Dunkel umschalten">
-        <span aria-hidden="true">◐</span>
-      </button>
-    </header>
 
-    <main class="layout">
-      <!-- ------------------------------------------------------ Eingaben -->
-      <section class="panel" aria-label="Einstellungen">
-        <form id="route-form" novalidate>
-          <fieldset class="field">
-            <legend>Wo geht's los?</legend>
-            <div class="input-row">
-              <input
-                type="text"
-                id="start-input"
-                name="start"
-                placeholder="Ort, Adresse oder 48.4636, 8.4117"
-                autocomplete="off"
-                spellcheck="false"
-                aria-describedby="start-hint"
-              />
-              <button type="button" id="locate-btn" class="icon-button" title="Aktuellen Standort verwenden">
-                <span aria-hidden="true">◎</span><span class="sr-only">Standort ermitteln</span>
-              </button>
-              <button type="button" id="pick-start-btn" class="icon-button" title="Auf der Karte wählen" aria-pressed="false">
-                <span aria-hidden="true">✛</span><span class="sr-only">Start auf der Karte wählen</span>
-              </button>
+      <p class="status" id="status" role="status" aria-live="polite"></p>
+
+      <!-- ------------------------------------------------ Bedienblatt -->
+      <section class="sheet" id="sheet" aria-label="Streckenplanung">
+        <div class="sheet__handle" id="sheet-handle" role="button" tabindex="0" aria-label="Bedienfeld auf- und zuklappen">
+          <span class="sheet__grip" aria-hidden="true"></span>
+          <div class="sheet__summary" id="sheet-summary"></div>
+        </div>
+
+        <div class="sheet__scroll" id="sheet-scroll">
+          <div class="alert" id="alert" role="alert" hidden></div>
+
+          <article class="result" id="result" hidden>
+            <header class="result__head">
+              <h2 id="route-name">Route</h2>
+              <p class="result__sub" id="route-sub"></p>
+            </header>
+
+            <div class="stats" id="stats"></div>
+            <div class="variants" id="route-variants" role="group" aria-label="Varianten"></div>
+
+            <section class="card">
+              <h3 class="card__title">Höhenprofil</h3>
+              <div class="elevation" id="elevation"></div>
+              <details class="table-view">
+                <summary>Werte als Tabelle</summary>
+                <div class="table-scroll">
+                  <table id="elevation-table">
+                    <caption class="sr-only">Höhe und Steigung entlang der Route</caption>
+                    <thead>
+                      <tr><th scope="col">km</th><th scope="col">Höhe</th><th scope="col">Steigung</th></tr>
+                    </thead>
+                    <tbody></tbody>
+                  </table>
+                </div>
+              </details>
+            </section>
+
+            <div class="actions actions--result">
+              <button type="button" class="button button--primary" id="gpx-btn">GPX herunterladen</button>
+              <a class="button" id="gmaps-btn" href="#" target="_blank" rel="noopener">Google Maps</a>
+              <button type="button" class="button" id="reroll-btn">Neu würfeln</button>
             </div>
-            <ul class="suggest" id="start-suggest" hidden></ul>
-            <p class="hint" id="start-hint">Die Nadel auf der Karte lässt sich auch einfach verschieben.</p>
-          </fieldset>
+            <p class="hint" id="export-hint"></p>
+          </article>
 
-          <fieldset class="field">
-            <legend>
-              Wie lange willst du fahren?
-              <output id="duration-out" for="duration">2 h 00 min</output>
-            </legend>
-            <input type="range" id="duration" name="duration" min="30" max="480" step="15" value="120" />
-            <div class="scale"><span>30 min</span><span>4 h</span><span>8 h</span></div>
-            <p class="hint">Reine Fahrzeit ohne Pausen – Kaffee und Tanken kommen obendrauf.</p>
-          </fieldset>
+          <div class="placeholder" id="placeholder">
+            <strong>Noch keine Route.</strong>
+            <span>Start setzen, Dauer und Kurvigkeit wählen – und losfahren.</span>
+          </div>
 
-          <fieldset class="field">
-            <legend>Wie kurvig?</legend>
-            <div class="segmented" id="curviness" role="radiogroup" aria-label="Kurvigkeit"></div>
-            <p class="hint" id="curviness-hint"></p>
-          </fieldset>
-
-          <fieldset class="field">
-            <legend>Runde oder Strecke?</legend>
-            <div class="segmented segmented--wide" id="mode" role="radiogroup" aria-label="Streckenart"></div>
-
-            <div id="oneway-extra" hidden>
-              <label class="label" for="end-input">Ziel (optional)</label>
+          <form id="route-form" novalidate>
+            <fieldset class="field">
+              <legend>Wo geht's los?</legend>
               <div class="input-row">
                 <input
                   type="text"
-                  id="end-input"
-                  placeholder="Leer lassen = überrasch mich"
+                  id="start-input"
+                  name="start"
+                  placeholder="Ort, Adresse oder 48.4636, 8.4117"
                   autocomplete="off"
                   spellcheck="false"
+                  aria-describedby="start-hint"
                 />
-                <button type="button" id="pick-end-btn" class="icon-button" title="Auf der Karte wählen" aria-pressed="false">
-                  <span aria-hidden="true">✛</span><span class="sr-only">Ziel auf der Karte wählen</span>
-                </button>
-                <button type="button" id="clear-end-btn" class="icon-button" title="Ziel löschen">
-                  <span aria-hidden="true">✕</span><span class="sr-only">Ziel löschen</span>
-                </button>
               </div>
-              <ul class="suggest" id="end-suggest" hidden></ul>
-            </div>
+              <ul class="suggest" id="start-suggest" hidden></ul>
+              <p class="hint" id="start-hint">Standortknopf oben rechts, oder die Nadel auf der Karte verschieben.</p>
+            </fieldset>
 
-            <label class="label" for="bearing">Richtung</label>
-            <select id="bearing" name="bearing">
-              <option value="">Ist mir egal</option>
-              <option value="0">Norden</option>
-              <option value="45">Nordosten</option>
-              <option value="90">Osten</option>
-              <option value="135">Südosten</option>
-              <option value="180">Süden</option>
-              <option value="225">Südwesten</option>
-              <option value="270">Westen</option>
-              <option value="315">Nordwesten</option>
-            </select>
-          </fieldset>
+            <fieldset class="field">
+              <legend>
+                <span>Wie lange?</span>
+                <output id="duration-out" for="duration">2 h 00 min</output>
+              </legend>
+              <input type="range" id="duration" name="duration" min="30" max="480" step="15" value="120" />
+              <div class="scale"><span>30 min</span><span>4 h</span><span>8 h</span></div>
+              <p class="hint">Reine Fahrzeit ohne Pausen.</p>
+            </fieldset>
 
-          <details class="field field--details" id="advanced">
-            <summary>Feineinstellungen</summary>
+            <fieldset class="field">
+              <legend><span>Wie kurvig?</span></legend>
+              <div class="segmented" id="curviness" role="radiogroup" aria-label="Kurvigkeit"></div>
+              <p class="hint" id="curviness-hint"></p>
+            </fieldset>
 
-            <label class="check">
-              <input type="checkbox" id="avoid-motorway" checked />
-              <span>Autobahn meiden</span>
-            </label>
-            <label class="check">
-              <input type="checkbox" id="avoid-unpaved" checked />
-              <span>Schotter und Feldwege meiden</span>
-            </label>
-            <label class="check">
-              <input type="checkbox" id="avoid-toll" checked />
-              <span>Mautstraßen meiden</span>
-            </label>
-            <label class="check">
-              <input type="checkbox" id="snap-roads" checked />
-              <span>Wegpunkte auf echte Straßen setzen</span>
-            </label>
-            <p class="hint">
-              Fragt einmal je Suche das Straßennetz der Gegend ab (OpenStreetMap/Overpass).
-              Ohne das werden die Wegpunkte blind auf einen Kreis gesetzt – im Gebirge landen
-              sie dann auf Waldwegen und in Sackgassen.
+            <fieldset class="field">
+              <legend><span>Runde oder Strecke?</span></legend>
+              <div class="segmented segmented--wide" id="mode" role="radiogroup" aria-label="Streckenart"></div>
+
+              <div id="oneway-extra" hidden>
+                <label class="label" for="end-input">Ziel (optional)</label>
+                <div class="input-row">
+                  <input
+                    type="text"
+                    id="end-input"
+                    placeholder="Leer lassen = überrasch mich"
+                    autocomplete="off"
+                    spellcheck="false"
+                  />
+                  <button type="button" id="pick-end-btn" class="icon-button" title="Auf der Karte wählen" aria-pressed="false">
+                    <svg viewBox="0 0 24 24" aria-hidden="true" class="icon"><path d="M12 21s7-6.4 7-11a7 7 0 1 0-14 0c0 4.6 7 11 7 11Z" class="icon--stroke"/><circle cx="12" cy="10" r="2.4"/></svg>
+                    <span class="sr-only">Ziel auf der Karte wählen</span>
+                  </button>
+                  <button type="button" id="clear-end-btn" class="icon-button" title="Ziel löschen">
+                    <svg viewBox="0 0 24 24" aria-hidden="true" class="icon"><path d="M6 6l12 12M18 6 6 18" class="icon--stroke"/></svg>
+                    <span class="sr-only">Ziel löschen</span>
+                  </button>
+                </div>
+                <ul class="suggest" id="end-suggest" hidden></ul>
+              </div>
+
+              <label class="label" for="bearing">Richtung</label>
+              <select id="bearing" name="bearing">
+                <option value="">Ist mir egal</option>
+                <option value="0">Norden</option>
+                <option value="45">Nordosten</option>
+                <option value="90">Osten</option>
+                <option value="135">Südosten</option>
+                <option value="180">Süden</option>
+                <option value="225">Südwesten</option>
+                <option value="270">Westen</option>
+                <option value="315">Nordwesten</option>
+              </select>
+            </fieldset>
+
+            <details class="field field--details" id="advanced">
+              <summary>Feineinstellungen</summary>
+
+              <label class="check">
+                <input type="checkbox" id="avoid-motorway" checked />
+                <span>Autobahn meiden</span>
+              </label>
+              <label class="check">
+                <input type="checkbox" id="avoid-unpaved" checked />
+                <span>Schotter und Feldwege meiden</span>
+              </label>
+              <label class="check">
+                <input type="checkbox" id="avoid-toll" checked />
+                <span>Mautstraßen meiden</span>
+              </label>
+              <label class="check">
+                <input type="checkbox" id="snap-roads" checked />
+                <span>Wegpunkte auf echte Straßen setzen</span>
+              </label>
+              <p class="hint">
+                Lädt einmal je Suche das Straßennetz der Gegend (OpenStreetMap/Overpass). Ohne das
+                landen die Wegpunkte im Gebirge auf Waldwegen und in Sackgassen.
+              </p>
+
+              <label class="label" for="variant-count">Wie viele Varianten vergleichen?</label>
+              <select id="variant-count">
+                <option value="1">1 – geht am schnellsten</option>
+                <option value="2">2</option>
+                <option value="3" selected>3 – guter Kompromiss</option>
+                <option value="4">4 – beste Trefferquote</option>
+              </select>
+
+              <label class="label" for="provider">Routing-Dienst</label>
+              <select id="provider">
+                <option value="brouter">BRouter (kostenlos, ohne Anmeldung)</option>
+                <option value="openrouteservice">OpenRouteService (kostenloser Key)</option>
+                <option value="graphhopper">GraphHopper (Key, Gratis-Tarif eingeschränkt)</option>
+              </select>
+
+              <div id="brouter-options">
+                <label class="label" for="brouter-profile">BRouter-Profil</label>
+                <select id="brouter-profile"></select>
+                <label class="label" for="brouter-url">Eigener BRouter-Server (optional)</label>
+                <input type="url" id="brouter-url" placeholder="https://brouter.de/brouter" autocomplete="off" />
+              </div>
+
+              <div id="ors-options" hidden>
+                <label class="label" for="ors-key">OpenRouteService API-Key</label>
+                <input type="password" id="ors-key" autocomplete="off" placeholder="Key von openrouteservice.org" />
+                <p class="hint">Bleibt in diesem Browser und geht nur an openrouteservice.org.</p>
+              </div>
+
+              <div id="graphhopper-options" hidden>
+                <label class="label" for="graphhopper-key">GraphHopper API-Key</label>
+                <input type="password" id="graphhopper-key" autocomplete="off" placeholder="Key von graphhopper.com" />
+                <p class="hint">Bleibt in diesem Browser und geht nur an graphhopper.com.</p>
+              </div>
+
+              <p class="hint" id="capability-hint"></p>
+            </details>
+
+            <p class="footnote">
+              Karten &amp; Routing:
+              <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a>,
+              <a href="https://brouter.de" target="_blank" rel="noopener">BRouter</a>,
+              <a href="https://opentopomap.org" target="_blank" rel="noopener">OpenTopoMap</a>,
+              <a href="https://nominatim.openstreetmap.org" target="_blank" rel="noopener">Nominatim</a>.
             </p>
-
-            <label class="label" for="variant-count">Wie viele Varianten vergleichen?</label>
-            <select id="variant-count">
-              <option value="1">1 – geht am schnellsten</option>
-              <option value="2">2</option>
-              <option value="3" selected>3 – guter Kompromiss</option>
-              <option value="4">4 – beste Trefferquote</option>
-            </select>
-
-            <label class="label" for="provider">Routing-Dienst</label>
-            <select id="provider">
-              <option value="brouter">BRouter (kostenlos, ohne Anmeldung)</option>
-              <option value="openrouteservice">OpenRouteService (kostenloser Key)</option>
-              <option value="graphhopper">GraphHopper (Key, Gratis-Tarif eingeschränkt)</option>
-            </select>
-
-            <div id="brouter-options">
-              <label class="label" for="brouter-profile">BRouter-Profil</label>
-              <select id="brouter-profile"></select>
-              <label class="label" for="brouter-url">Eigener BRouter-Server (optional)</label>
-              <input type="url" id="brouter-url" placeholder="https://brouter.de/brouter" autocomplete="off" />
-            </div>
-
-            <div id="ors-options" hidden>
-              <label class="label" for="ors-key">OpenRouteService API-Key</label>
-              <input type="password" id="ors-key" autocomplete="off" placeholder="Key von openrouteservice.org" />
-              <p class="hint">
-                Wird nur in diesem Browser gespeichert und ausschließlich an openrouteservice.org
-                geschickt.
-              </p>
-            </div>
-
-            <div id="graphhopper-options" hidden>
-              <label class="label" for="graphhopper-key">GraphHopper API-Key</label>
-              <input type="password" id="graphhopper-key" autocomplete="off" placeholder="Key von graphhopper.com" />
-              <p class="hint">
-                Wird nur in diesem Browser gespeichert und ausschließlich an graphhopper.com geschickt.
-              </p>
-            </div>
-
-            <p class="hint" id="capability-hint"></p>
-          </details>
-
-          <div class="actions">
-            <button type="submit" class="button button--primary" id="generate-btn">Strecke generieren</button>
-            <button type="button" class="button" id="surprise-btn">Überrasch mich</button>
-          </div>
-        </form>
-      </section>
-
-      <!-- ------------------------------------------------------ Ergebnis -->
-      <section class="results" aria-label="Ergebnis">
-        <div id="map" class="map"></div>
-
-        <div class="status" id="status" role="status" aria-live="polite"></div>
-        <div class="alert" id="alert" role="alert" hidden></div>
-
-        <div class="placeholder" id="placeholder">
-          <p><strong>Noch keine Route.</strong></p>
-          <p>
-            Start setzen, Dauer und Kurvigkeit wählen, auf <em>Strecke generieren</em> tippen –
-            und losfahren.
-          </p>
+          </form>
         </div>
 
-        <article class="result" id="result" hidden>
-          <header class="result__head">
-            <h2 id="route-name">Route</h2>
-            <p class="result__sub" id="route-sub"></p>
-          </header>
-
-          <div class="stats" id="stats"></div>
-
-          <div class="variants" id="route-variants" role="group" aria-label="Varianten"></div>
-
-          <section class="card">
-            <h3 class="card__title">Höhenprofil</h3>
-            <div class="elevation" id="elevation"></div>
-            <details class="table-view">
-              <summary>Werte als Tabelle</summary>
-              <div class="table-scroll">
-                <table id="elevation-table">
-                  <caption class="sr-only">Höhe und Steigung entlang der Route</caption>
-                  <thead>
-                    <tr><th scope="col">km</th><th scope="col">Höhe</th><th scope="col">Steigung</th></tr>
-                  </thead>
-                  <tbody></tbody>
-                </table>
-              </div>
-            </details>
-          </section>
-
-          <div class="actions actions--result">
-            <button type="button" class="button button--primary" id="gpx-btn">GPX herunterladen</button>
-            <a class="button" id="gmaps-btn" href="#" target="_blank" rel="noopener">In Google Maps öffnen</a>
-            <button type="button" class="button" id="reroll-btn">Neu würfeln</button>
-          </div>
-          <p class="hint" id="export-hint"></p>
-        </article>
+        <div class="sheet__actions">
+          <button type="submit" form="route-form" class="button button--primary button--go" id="generate-btn">
+            Strecke generieren
+          </button>
+          <button type="button" class="button" id="surprise-btn">Überrasch mich</button>
+        </div>
       </section>
-    </main>
-
-    <footer class="footer">
-      Karten &amp; Routing:
-      <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap</a>,
-      <a href="https://brouter.de" target="_blank" rel="noopener">BRouter</a>,
-      <a href="https://opentopomap.org" target="_blank" rel="noopener">OpenTopoMap</a>.
-      Ortssuche: <a href="https://nominatim.openstreetmap.org" target="_blank" rel="noopener">Nominatim</a>.
-    </footer>
+    </div>
 
     <script src="vendor/leaflet/leaflet.js"></script>
     <script type="module" src="assets/js/app.js"></script>

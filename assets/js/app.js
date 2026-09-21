@@ -26,6 +26,7 @@ import {
 import { BROUTER_PROFILES, createRouter, geocode, reverseGeocode } from './routers.js';
 import { MapView } from './mapview.js';
 import { ElevationChart } from './elevation.js';
+import { Sheet } from './sheet.js';
 import { buildGpx, downloadText, googleMapsUrl, gpxFilename } from './export.js';
 import { DEFAULTS, loadSettings, saveSettings } from './store.js';
 
@@ -58,6 +59,7 @@ const state = {
 
 let map;
 let chart;
+let sheet;
 const roadCache = new Map();
 
 /* ------------------------------------------------------------------ Start */
@@ -75,9 +77,11 @@ function init() {
     onCandidatePick: (id) => selectCandidate(id),
   });
   chart = new ElevationChart($('elevation'), { onHover: handleChartHover });
+  sheet = new Sheet($('sheet'), $('sheet-handle'), document.querySelector('.sheet__actions'));
 
   restoreForm();
   wireEvents();
+  updateSummary();
 
   if (state.settings.start) {
     setStart(state.settings.start, state.settings.startLabel, { pan: true });
@@ -264,7 +268,26 @@ function updateProviderUi() {
   $('capability-hint').textContent = PROVIDER_HINTS[p] ?? '';
 }
 
-const persist = () => saveSettings(state.settings);
+function persist() {
+  saveSettings(state.settings);
+  updateSummary();
+}
+
+/**
+ * Was im zugeklappten Zustand zu sehen ist: die drei Angaben, die die
+ * Strecke bestimmen. Ohne das muesste man das Blatt aufziehen, nur um zu
+ * sehen, was gerade eingestellt ist.
+ */
+function updateSummary() {
+  const s = state.settings;
+  const stufe = CURVINESS.find((c) => c.value === s.curviness) ?? CURVINESS[2];
+  const art = MODES.find((m) => m.value === s.mode) ?? MODES[0];
+  $('sheet-summary').innerHTML = [
+    `<span><b>${escapeHtml(formatDuration(s.durationMin))}</b></span>`,
+    `<span>${escapeHtml(stufe.label)}</span>`,
+    `<span>${escapeHtml(art.label)}</span>`,
+  ].join('');
+}
 
 /* --------------------------------------------------------- Start und Ziel */
 
@@ -490,15 +513,16 @@ async function run() {
       onProgress: ({ message }) => setStatus(`${message} …`),
     });
     state.candidates = candidates;
+    // Halb aufziehen: Kennzahlen lesbar, Karte weiterhin sichtbar.
+    sheet.setState('half');
     showResult(best);
-    if (matchMedia('(max-width: 899px)').matches) {
-      $('map').scrollIntoView({ behavior: 'smooth', block: 'start' });
-    }
+    $('sheet-scroll').scrollTo({ top: 0 });
     const gewuenscht = state.settings.variants;
     setStatus(
       candidates.length < gewuenscht
-        ? `${candidates.length} von ${gewuenscht} Varianten sind durchgekommen – die beste steht unten.`
-        : `${candidates.length} Variante${candidates.length === 1 ? '' : 'n'} durchgerechnet – die beste steht unten.`,
+        ? `${candidates.length} von ${gewuenscht} Varianten sind durchgekommen – die beste ist ausgewählt.`
+        : `${candidates.length} Variante${candidates.length === 1 ? '' : 'n'} durchgerechnet – die beste ist ausgewählt.`,
+      { fluechtig: true },
     );
     const alle = [
       ...netzWarnungen,
@@ -516,6 +540,20 @@ async function run() {
   } finally {
     setBusy(false);
   }
+}
+
+/**
+ * Wie viel Karte verdeckt die Oberflaeche gerade? Danach richtet sich, wohin
+ * die Route eingepasst wird.
+ */
+function kartenrand() {
+  const blatt = $('sheet');
+  const seitenspalte = getComputedStyle($('sheet-handle')).display === 'none';
+  if (seitenspalte) return { left: blatt.offsetWidth + 28, top: 70, right: 24, bottom: 24 };
+  // Die Zielhoehe, nicht die gemessene: das Blatt faehrt gerade noch auf, und
+  // die Route soll in den Platz passen, den es danach uebrig laesst.
+  const sichtbar = sheet.heightFor(sheet.state);
+  return { left: 24, top: 70, right: 24, bottom: Math.min(sichtbar + 16, window.innerHeight * 0.55) };
 }
 
 /**
@@ -642,7 +680,7 @@ function showResult(candidate) {
   $('placeholder').hidden = true;
   $('result').hidden = false;
 
-  map.showRoute(candidate, state.candidates);
+  map.showRoute(candidate, state.candidates, kartenrand());
   renderStats(candidate);
   renderVariants();
   renderElevation(candidate);
@@ -825,8 +863,19 @@ function setBusy(busy) {
   document.body.classList.toggle('is-busy', busy);
 }
 
-const setStatus = (text) => {
+let statusTimer;
+/**
+ * Die Statusblase liegt ueber der Karte. Fortschritt darf stehen bleiben,
+ * eine Erfolgsmeldung soll nach ein paar Sekunden den Blick freigeben.
+ */
+const setStatus = (text, { fluechtig = false } = {}) => {
+  clearTimeout(statusTimer);
   $('status').textContent = text;
+  if (text && fluechtig) {
+    statusTimer = setTimeout(() => {
+      $('status').textContent = '';
+    }, 6000);
+  }
 };
 
 function showAlert(message, kind = 'error') {

@@ -75,8 +75,14 @@ export class MapView {
     return marker;
   }
 
-  /** Hauptroute zeichnen; die uebrigen Kandidaten blass daneben. */
-  showRoute(candidate, alternatives = []) {
+  /**
+   * Hauptroute zeichnen; die uebrigen Kandidaten blass daneben.
+   *
+   * `rand` haelt die Route aus den Bereichen heraus, die das Bedienblatt
+   * oder die Seitenspalte verdecken -- sonst passt die App die Runde brav
+   * ein und die Haelfte davon liegt unter dem Formular.
+   */
+  showRoute(candidate, alternatives = [], rand = {}) {
     this.routeLayer.clearLayers();
     this.altLayer.clearLayers();
 
@@ -98,8 +104,11 @@ export class MapView {
 
     const latlngs = toLatLngs(candidate.coords);
     L.polyline(latlngs, { className: 'route-line route-line--casing', weight: 8 }).addTo(this.routeLayer);
-    L.polyline(latlngs, { className: 'route-line route-line--main', weight: 4 }).addTo(this.routeLayer);
-    this.map.fitBounds(L.latLngBounds(latlngs).pad(0.08));
+    L.polyline(latlngs, { className: 'route-line route-line--main', weight: 4.5 }).addTo(this.routeLayer);
+    this.map.fitBounds(L.latLngBounds(latlngs), {
+      paddingTopLeft: [rand.left ?? 24, rand.top ?? 70],
+      paddingBottomRight: [rand.right ?? 24, rand.bottom ?? 24],
+    });
   }
 
   clearRoute() {

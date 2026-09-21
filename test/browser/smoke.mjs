@@ -205,7 +205,7 @@ try {
   await page.press('#start-input', 'Enter');
   await page.locator('#duration').fill('150');
   check((await page.locator('#duration-out').textContent()).includes('2 h 30'), 'Dauer wird lesbar angezeigt');
-  await page.locator('#curviness-4').check({ force: true });
+  await page.locator('label[for="curviness-4"]').click();
   check(
     (await page.locator('#curviness-hint').textContent()).includes('Richtig kurvig'),
     'Kurvigkeitstext passt zur Auswahl',
@@ -268,7 +268,7 @@ try {
   check(gpx.includes('<trkpt') && gpx.includes('<ele>'), 'GPX enthaelt Trackpunkte mit Hoehe');
 
   console.log('\n# Einwegstrecke');
-  await page.locator('#mode-oneway').check({ force: true });
+  await page.locator('label[for="mode-oneway"]').click();
   check(await page.locator('#oneway-extra').isVisible(), 'Zielfeld erscheint');
   await page.selectOption('#bearing', '90');
   await page.locator('#duration').fill('90');
@@ -294,7 +294,7 @@ try {
   // Die Sperre muss fallen (Inselfehler), aber die fertige Route berührt
   // keine Mautstraße -- also darf auch nicht vor Maut gewarnt werden.
   inselFehlerUebrig = 3;
-  await page.locator('#mode-loop').check({ force: true });
+  await page.locator('label[for="mode-loop"]').click();
   await page.locator('#duration').fill('135');
   await page.click('#generate-btn');
   await page.waitForFunction(() => !document.getElementById('generate-btn').disabled, null, {
@@ -308,7 +308,7 @@ try {
 
   console.log('\n# Strassennetz nicht erreichbar');
   await context.route('**/api/interpreter', (r) => r.fulfill({ status: 504, body: 'gateway timeout' }));
-  await page.locator('#mode-loop').check({ force: true });
+  await page.locator('label[for="mode-loop"]').click();
   await page.locator('#duration').fill('300'); // anderer Suchradius -> nicht aus dem Speicher
   await page.click('#generate-btn');
   await page.waitForFunction(() => !document.getElementById('generate-btn').disabled, null, {
@@ -335,11 +335,35 @@ try {
   await page.selectOption('#provider', 'brouter');
 
   console.log('\n# Darstellung');
-  await page.locator('#mode-loop').check({ force: true });
-  await page.screenshot({ path: join(SHOTS, 'desktop-hell.png'), fullPage: true });
+  await page.locator('label[for="mode-loop"]').click();
+  await page.click('#generate-btn');
+  await page.locator('#result').waitFor({ state: 'visible', timeout: 30000 });
+  await page.waitForFunction(() => !document.getElementById('generate-btn').disabled, null, {
+    timeout: 30000,
+  });
+  await page.waitForTimeout(400);
+  const geo = await page.evaluate(() => {
+    const el = document.querySelector('.sheet');
+    const r = el.getBoundingClientRect();
+    const app = document.querySelector('.app');
+    return {
+      vh: window.innerHeight,
+      sheetY: Math.round(r.y),
+      sheetH: Math.round(r.height),
+      appScroll: app.scrollTop,
+    };
+  });
+  check(
+    geo.appScroll === 0 && geo.sheetY >= 0 && geo.sheetH > geo.vh - 60,
+    `Oberflaeche sitzt fest im Bildschirm (Blatt bei ${geo.sheetY}px, ${geo.sheetH}px hoch, Versatz ${geo.appScroll}px)`,
+  );
+  await page.screenshot({ path: join(SHOTS, 'desktop-hell.png'), fullPage: false });
   await page.click('#theme-toggle');
   await page.waitForTimeout(250);
-  await page.screenshot({ path: join(SHOTS, 'desktop-dunkel.png'), fullPage: true });
+  await page.screenshot({ path: join(SHOTS, 'desktop-dunkel.png'), fullPage: false });
+  // Zurueck auf hell: das Handy soll den Normalfall zeigen.
+  await page.click('#theme-toggle');
+  await page.waitForTimeout(150);
 
   const mobile = await context.newPage();
   await mobile.setViewportSize({ width: 390, height: 844 });
@@ -347,8 +371,44 @@ try {
   const overflow = await mobile.evaluate(
     () => document.documentElement.scrollWidth - document.documentElement.clientWidth,
   );
+  const knopf = await mobile.evaluate(() => {
+    const r = document.getElementById('generate-btn').getBoundingClientRect();
+    const blatt = document.querySelector('.sheet').getBoundingClientRect();
+    return { unten: Math.round(r.bottom), vh: window.innerHeight, blattH: Math.round(blatt.height) };
+  });
+  check(
+    knopf.unten <= knopf.vh + 1,
+    `Startknopf bleibt auch zugeklappt im Bild (Unterkante ${knopf.unten}px von ${knopf.vh}px)`,
+  );
+  check(
+    knopf.blattH < knopf.vh * 0.45,
+    `Zugeklappt gibt das Blatt die Karte frei (${knopf.blattH}px von ${knopf.vh}px)`,
+  );
   check(overflow <= 0, `Kein waagerechtes Scrollen am Handy (Ueberhang ${overflow}px)`);
-  await mobile.screenshot({ path: join(SHOTS, 'mobil.png'), fullPage: true });
+  await mobile.screenshot({ path: join(SHOTS, 'mobil-zu.png'), fullPage: false });
+
+  await mobile.fill('#start-input', '48.4636, 8.4117');
+  await mobile.press('#start-input', 'Enter');
+  await mobile.click('#generate-btn');
+  await mobile.locator('#result').waitFor({ state: 'visible', timeout: 30000 });
+  await mobile.waitForFunction(() => !document.getElementById('generate-btn').disabled, null, {
+    timeout: 30000,
+  });
+  await mobile.waitForTimeout(600);
+  const halb = await mobile.evaluate(() => {
+    const r = document.querySelector('.sheet').getBoundingClientRect();
+    const k = document.getElementById('generate-btn').getBoundingClientRect();
+    return { h: Math.round(r.height), vh: window.innerHeight, knopfUnten: Math.round(k.bottom) };
+  });
+  check(
+    halb.h > halb.vh * 0.4 && halb.h < halb.vh * 0.7,
+    `Nach dem Generieren steht das Blatt halb offen (${halb.h}px von ${halb.vh}px)`,
+  );
+  check(
+    halb.knopfUnten <= halb.vh + 1,
+    `Knopfleiste bleibt auch halb offen im Bild (${halb.knopfUnten}px)`,
+  );
+  await mobile.screenshot({ path: join(SHOTS, 'mobil.png'), fullPage: false });
 
   check(errors.length === 0, `Keine JS-Fehler${errors.length ? `: ${errors.join(' | ')}` : ''}`);
 
