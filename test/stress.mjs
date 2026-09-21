@@ -386,6 +386,7 @@ const zeitfehler = [];
 const ausfaelle = [];
 const zeitDetail = [];
 const achten = [];
+const schnitte = [];
 const richtungsfehler = [];
 
 for (let lauf = 1; lauf <= DURCHLAEUFE; lauf++) {
@@ -479,6 +480,7 @@ for (let lauf = 1; lauf <= DURCHLAEUFE; lauf++) {
     // Eine Acht ist zwei Runden mit gemeinsamem Knoten -- fahrbar, aber nicht
     // das, wonach gefragt war.
     if (anfrage.mode === 'loop') achten.push(ergebnis.best.startRevisits ?? 0);
+    schnitte.push(ergebnis.best.spurCuts ?? 0);
 
     // Haelt sich die Route an die Wunschrichtung? Gemessen am Schwerpunkt der
     // Strecke: liegt er in der gewuenschten Himmelsrichtung vom Start aus?
@@ -511,6 +513,10 @@ console.log(`Erfolgreich:        ${erfolge}/${DURCHLAEUFE}  (ohne Route: ${fehls
 console.log(`Anfragen je Lauf:   ${(anfragen / DURCHLAEUFE).toFixed(1)}`);
 console.log(`Doppeltfahren:      Median ${overlapPercent(med(overlaps))} %, P90 ${overlapPercent(p90(overlaps))} %`);
 console.log(`Zeitabweichung:     Median ${(med(zeitfehler) * 100).toFixed(0)} %, P90 ${(p90(zeitfehler) * 100).toFixed(0)} %`);
+const mitSchnitt = schnitte.filter((x) => x > 0).length;
+console.log(
+  `Aeste geschnitten:  bei ${mitSchnitt}/${schnitte.length} Strecken (${schnitte.reduce((a, b) => a + b, 0)} Schnitte)`,
+);
 const mitAcht = achten.filter((x) => x > 0).length;
 console.log(
   `Achten statt Runde: ${mitAcht}/${achten.length} (${Math.round((mitAcht / Math.max(1, achten.length)) * 100)} %)`,

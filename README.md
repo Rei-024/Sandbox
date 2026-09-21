@@ -42,11 +42,13 @@ Router verbinden Punkte. Also erzeugt die App die Punkte selbst:
 1. **Ziellänge schätzen.** Aus Wunschdauer und Wunschkurvigkeit über ein
    Geschwindigkeitsmodell: je kurviger, desto langsamer (≈ 75 km/h auf schnellen
    Landstraßen, ≈ 39 km/h im Serpentinen-Modus).
-2. **Wegpunkte setzen.** Für eine Runde auf einen Ring um den Start. Je höher die
-   Wunschkurvigkeit, desto mehr Wegpunkte (5 bis 9) und desto stärker wechseln
-   die Radien – der Router muss dann öfter von der schnellen Hauptachse runter,
-   und genau das erzeugt kurvige Strecken. Für eine Einwegstrecke liegen die
-   Punkte abwechselnd links und rechts der Luftlinie.
+2. **Wegpunkte setzen.** Für eine Runde auf einen Ring, dessen Mittelpunkt eine
+   Radiuslänge in Fahrtrichtung liegt – der Start sitzt also auf dem *Rand* der
+   Schleife, nicht in ihrer Mitte. Je höher die Wunschkurvigkeit, desto mehr
+   Wegpunkte (5 bis 9) und desto stärker wechseln die Radien – der Router muss
+   dann öfter von der schnellen Hauptachse runter, und genau das erzeugt kurvige
+   Strecken. Für eine Einwegstrecke liegen die Punkte abwechselnd links und
+   rechts der Luftlinie.
 3. **Routen lassen und nachmessen.** Aus der fertigen Geometrie werden Länge,
    Kurvigkeit (Summe der Richtungswechsel je Kilometer), Höhenmeter und der
    Anteil doppelt gefahrener Strecke berechnet.
@@ -70,6 +72,40 @@ Grobe Eichung des Kurvigkeitsmaßes in Grad Richtungswechsel je Kilometer:
 | ~220 | Landstraße mit Schwung | 3 |
 | ~330 | kleines Sträßchen, viel Kurbelei | 4 |
 | ~450 | Passstraße, Serpentinen | 5 |
+
+### Warum die Schleife neben dem Start liegt
+
+Naheliegend wäre ein Ring **um** den Start. Der hat zwei Fehler, und beide
+fallen erst beim Fahren auf.
+
+Erstens ist eine Wunschrichtung an einem Vollkreis wirkungslos: sie dreht ihn
+nur, und ein gedrehter Vollkreis ist derselbe Vollkreis. Wer Südwesten wählte,
+bekam eine Runde, die auch nach Südwesten führte – und genauso nach Nordosten.
+
+Zweitens zwingt ein Ring um den Start zur **Acht**, sobald der Startort ein
+Talknoten ist. Liegen die Wegpunkte rundherum, muss die Route irgendwann von
+der einen Seite auf die andere – und der einzige Weg dorthin führt durch den
+Startort zurück. Heraus kommen zwei Runden mit gemeinsamem Knoten statt einer.
+
+Liegt die Schleife dagegen neben dem Start, hat sie beide Probleme nicht: die
+Richtung ist die Lage der Schleife, und eine Runde auf einer Seite braucht den
+Startort nicht als Durchgang.
+
+Der Preis ist Reichweite: die Schleife reicht doppelt so weit weg wie ihr
+Radius. Gibt die Gegend das nicht her – Talende, See, Grenze –, wird sie
+schrittweise zum Start zurückgezogen. Das lässt sich schon **vor** dem ersten
+Routing erkennen: wenn das Aufschnappen auf Straßen die Wegpunkte im Schnitt um
+mehr als 30 % des Radius verschiebt, liegt der Ring zum guten Teil neben jeder
+Straße. Diese Auskunft kostet keine Anfrage.
+
+Mit gewählter Richtung wird nur bis zur Hälfte zurückgezogen. Ein Ring rings um
+den Start wäre die Absage an jede Richtung, und eine kürzere Runde nach
+Südwesten ist mehr wert als eine zeitgenaue, die überallhin führt. Geht es gar
+nicht, sagt die App es (»Nach Südwesten gab die Gegend keine passende Runde
+her«).
+
+Wird am Ende doch eine Acht daraus, steht sie im Steckbrief: »unterwegs einmal
+wieder am Start vorbei«. Im Gebirge ist sie manchmal das Beste, was es gibt.
 
 ### Warum das Straßennetz nötig ist
 
@@ -240,7 +276,7 @@ außen gehen nur die Anfragen an den gewählten Routing-Dienst, an Nominatim
 ## Tests
 
 ```bash
-npm test                                            # 106 Unit-Tests, ohne Netz
+npm test                                            # 107 Unit-Tests, ohne Netz
 node --test test/stress.mjs                         # 300 Zufallsläufe gegen Zufallswelten
 NODE_PATH=$(npm root -g) node test/browser/smoke.mjs # kompletter Ablauf im Browser
 ```
@@ -253,12 +289,36 @@ Oberfläche nach: dass die Hülle im Bildschirm festsitzt, dass am Handy der
 Startknopf auch im zugeklappten Blatt sichtbar bleibt und dass nichts waagerecht
 überläuft. Screenshots landen in `test/screenshots/`. Er braucht Playwright.
 
-Die Belastungsprobe (`test/stress.mjs`) baut zufällige Straßennetze – Ringe,
-Speichen, Sackgassen, Inseln, Mautstraßen, Höhenrelief – und lässt die App 300
-zufällige Wünsche darauf lösen. Geprüft wird nicht der Geschmack, sondern das,
-was nie passieren darf: eine Runde, die nicht am Start endet, Sprünge in der
-Geometrie, eine Längenangabe, die nicht zur Linie passt, kaputtes GPX. Drei
-echte Fehler sind so gefunden worden, die von Hand niemand gesehen hätte.
+Die Belastungsprobe (`test/stress.mjs`) baut zufällige Straßennetze und lässt
+die App zufällige Wünsche darauf lösen. Geprüft wird nicht der Geschmack,
+sondern das, was nie passieren darf: eine Runde, die nicht am Start endet,
+Sprünge in der Geometrie, eine Längenangabe, die nicht zur Linie passt,
+kaputtes GPX.
+
+Zwei Welten, weil eine nicht reicht:
+
+- **Offenes Land** – konzentrische Ringe, Speichen, Sackgassen, Inseln,
+  Mautstraßen, Höhenrelief. Hier ist alles mit allem verbunden.
+- **Alpenwelt** (`talwelt`) – ein Talort als Knoten, davon abgehende Täler,
+  manche enden als Lutscher (langer Stiel, kleine Wendeschleife), und nur
+  manchmal verbindet ein Pass zwei Talköpfe. Hier führt der Weg von einem Tal
+  ins nächste oft durch den Startort zurück.
+
+In der Alpenwelt fährt der Testrouter auf einem **echten Graphen**
+(`test/graph.mjs`: Rasterknoten, Dijkstra) statt eine geschlängelte Linie von
+Wegpunkt zu Wegpunkt zu ziehen. Das ist der Unterschied zwischen einem
+Prüfstand, der Sackgassen und Achten melden *kann*, und einem, der für beides
+immer null meldet – während es auf dem Bildschirm steht. Genau das war er
+vorher.
+
+Gemessen wird deshalb auch, was den Fahrer stört und keinen Lauf abstürzen
+lässt: Anteil doppelt gefahrener Strecke, Anteil Achten statt Runden, und um
+wie viel Grad die gefahrene Richtung die gewünschte verfehlt. Für alle drei
+stehen Obergrenzen im Prüfstand – sie sind eine Sperre gegen Rückfall, kein
+Ziel.
+
+Sechs echte Fehler sind so gefunden worden, die von Hand niemand gesehen
+hätte.
 
 ## Aufbau
 
@@ -279,6 +339,7 @@ assets/js/
 server.js               kleiner Entwicklungsserver
 test/stress.mjs         Belastungsprobe gegen zufällige Straßennetze
 test/fake-router.mjs    simulierter Routing-Dienst für die Tests
+test/graph.mjs          Straßengraph mit Dijkstra für die Alpenwelt
 vendor/leaflet/         Leaflet 1.9.4, mitgeliefert statt per CDN
 ```
 
