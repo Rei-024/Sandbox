@@ -255,6 +255,38 @@ export const overlapRatio = (coords, cellM = 60) => overlapDetail(coords, cellM)
 export const overlapPercent = (ratio) => Math.min(100, Math.round(ratio * 200));
 
 /**
+ * Wie oft kommt die Runde unterwegs wieder am Start vorbei?
+ *
+ * Eine Acht ist zwei Runden mit einem gemeinsamen Knoten. Fahrbar, aber
+ * nicht das, was jemand meint, der "eine Runde" sagt -- man steht nach der
+ * halben Zeit wieder da, wo man losgefahren ist, und muss sich neu
+ * entscheiden. Im Gebirge ist das oft unvermeidlich, weil ein Talort der
+ * einzige Uebergang zwischen zwei Gegenden ist; deshalb wird es gezaehlt und
+ * gewichtet, nicht verboten.
+ *
+ * Anfang und Ende zaehlen naturgemaess nicht mit -- dort *soll* die Route am
+ * Start sein.
+ */
+export function startRevisits(coords, start, { radiusM = 500, randAnteil = 0.1 } = {}) {
+  if (!coords || coords.length < 4 || !start) return 0;
+  const pts = resample(coords, 50);
+  const cum = cumulativeDistance(pts);
+  const total = cum[cum.length - 1];
+  // Zu kurz, um zwischen "noch am Start" und "wieder am Start" zu trennen.
+  if (total < radiusM * 6) return 0;
+  const von = total * randAnteil;
+  const bis = total * (1 - randAnteil);
+  let drin = true;
+  let treffer = 0;
+  for (let i = 0; i < pts.length; i++) {
+    const jetzt = distance(pts[i], start) <= radiusM;
+    if (jetzt && !drin && cum[i] >= von && cum[i] <= bis) treffer++;
+    drin = jetzt;
+  }
+  return treffer;
+}
+
+/**
  * Wie viel eines Teilwegs faehrt die Rueckrichtung auf der Hinrichtung?
  *
  * Fuer die Frage "ist das ein Ast oder eine Schleife" ist overlapRatio das

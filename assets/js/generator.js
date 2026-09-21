@@ -31,6 +31,7 @@ import {
   midpoint,
   overlapDetail,
   similarity,
+  startRevisits,
 } from './geo.js';
 
 const MAX_ITERATIONS = 3; // Routing-Anfragen je Variante
@@ -42,8 +43,20 @@ const MAX_REPAIRS_PER_CALL = 3;
 const MAX_TRIES_PER_VARIANT = 5; // Routing-Anfragen je Variante, ohne Reparaturen
 const SPUR_LIMIT = 0.12; // ab hier lohnt es, gegen Stichstrassen vorzugehen
 const SPUR_DRINGEND = 0.08; // so weit darueber ist die Runde auch mit perfekter Zeit unbrauchbar
-const FESTGEFAHREN = 0.04; // aendert sich die Laenge kaum noch, bringt Nachskalieren nichts
+const FESTGEFAHREN = 0.04;
+/** Wie weit liegt die Schleife neben dem Start? 1 = Start auf ihrem Rand. */
+const START_EXZENTRIK = 1;
+/** Ab wie viel Versatz beim Aufschnappen passt die Schleife nicht in die Gegend? */
+const RING_VERSATZ_MAX = 0.3; // aendert sich die Laenge kaum noch, bringt Nachskalieren nichts
 const MAX_SPUR_FIXES = 2;
+/**
+ * Ab wie viel doppelt gefahrener Strecke ist es keine Runde mit einem Ast
+ * mehr, sondern schlicht Hin-und-Zurueck? Bei 0,5 waere die ganze Strecke
+ * zweimal gefahren; ein Drittel ist deutlich jenseits von "ein Ast dran".
+ */
+const SACKTAL = 0.3;
+/** Wie oft darf die Schleife komplett neu gelegt werden? */
+const MAX_RING_NEU = 2;
 
 /** Kleiner deterministischer Zufallsgenerator, damit "neu wuerfeln" reproduzierbar ist. */
 export function mulberry32(seed) {
@@ -86,7 +99,12 @@ function scoreCandidate(m, request) {
   const curvErr = Math.abs(m.curvinessLevel - request.curviness) / 4;
   const overlapWeight = request.mode === 'loop' ? 1.8 : 0.8;
   const uTurnPenalty = Math.min(0.3, m.curvature.uTurns * 0.04);
-  return timeErr + 0.7 * curvErr + overlapWeight * m.overlap + uTurnPenalty;
+  // Eine Acht ist keine Runde. Gedeckelt, weil es Gegenden gibt, in denen
+  // jeder Weg durch denselben Talort fuehrt -- dann ist die Acht das Beste,
+  // was es gibt, und soll nicht gegen eine schlechtere Strecke verlieren.
+  const achtPenalty =
+    request.mode === 'loop' ? Math.min(0.45, (m.startRevisits ?? 0) * 0.22) : 0;
+  return timeErr + 0.7 * curvErr + overlapWeight * m.overlap + uTurnPenalty + achtPenalty;
 }
 
 /** Wunschdauer -> anzupeilende Streckenlaenge in Metern. */
@@ -96,7 +114,28 @@ export function targetDistanceM(durationMin, curviness) {
 }
 
 /**
- * Wegpunkte auf einem Ring um den Start.
+ * Wegpunkte fuer eine Runde.
+ *
+ * Die Schleife liegt *neben* dem Start, nicht rings um ihn: ihr Mittelpunkt
+ * sitzt eine Radiuslaenge in Fahrtrichtung, der Start damit auf ihrem Rand.
+ * Das ist der Unterschied zwischen "ich fahre nach Suedwesten" und "ich fahre
+ * einmal aussen herum und komme dabei auch mal nach Suedwesten".
+ *
+ * Frueher lagen die Wegpunkte auf einem Ring um den Start. Die Wunschrichtung
+ * hat den Ring dann nur gedreht -- und ein gedrehter Vollkreis ist derselbe
+ * Vollkreis. Genau deshalb hat die Himmelsrichtung nichts bewirkt. Der
+ * Nebeneffekt ist mindestens so wichtig: eine Runde auf einer Seite muss
+ * nicht zwischendurch durch den Startort zurueck, um auf die andere Seite zu
+ * kommen -- das spart die Acht.
+ *
+ * Der Umfang bleibt 2*pi*r, die Laengenrechnung aendert sich also nicht; die
+ * Runde reicht nur weiter weg (2r statt r) statt rundherum.
+ *
+ * `exzentrik` ist die Notbremse dafuer: 1 heisst "Start am Rand der
+ * Schleife", 0 heisst "Start in ihrer Mitte", also der alte Ring. In einem
+ * Sacktal gibt die Gegend die zweifache Reichweite schlicht nicht her -- dann
+ * ist der Ring um den Start die einzige Runde, die es gibt, und besser als
+ * eine Runde, die eine Stunde zu kurz ausfaellt.
  *
  * Mehr Wegpunkte = der Router muss oefter vom schnellen Hauptweg abbiegen,
  * das ist der wirksamste Hebel fuer Kurvigkeit. Bei hoher Wunschkurvigkeit
@@ -104,20 +143,41 @@ export function targetDistanceM(durationMin, curviness) {
  * damit die Route sich durchs Gelaende schlaengelt statt brav im Kreis zu
  * fahren.
  */
-function ringWaypoints(start, radiusM, curviness, bearing0, rng, maxCount = 99) {
+function ringWaypoints(start, radiusM, curviness, bearing0, rng, maxCount = 99, exzentrik = 1) {
   const twisty = (curviness - 1) / 4;
   // 5 bis 9 -- aber nie mehr, als der Tarif des Dienstes je Anfrage zulaesst.
   const count = Math.max(2, Math.min(4 + Math.round(curviness), maxCount));
-  const angleJitter = (360 / count) * (0.15 + 0.25 * twisty);
+  const mitte = destination(start, bearing0, radiusM * exzentrik);
+  // Vom Mittelpunkt aus liegt der Start bei bearing0 + 180 Grad. Dieser Platz
+  // im Ring bleibt frei -- ihn fuellt der Start selbst.
+  const schritt = 360 / (count + 1);
+  const angleJitter = schritt * (0.15 + 0.25 * twisty);
   const radialJitter = 0.12 + 0.3 * twisty;
   const points = [];
-  for (let i = 0; i < count; i++) {
+  for (let i = 1; i <= count; i++) {
     const weave = twisty > 0.4 ? (i % 2 === 0 ? 1.12 : 0.84) : 1;
-    const angle = bearing0 + (360 * i) / count + (rng() - 0.5) * 2 * angleJitter;
+    const angle = bearing0 + 180 + schritt * i + (rng() - 0.5) * 2 * angleJitter;
     const radius = radiusM * weave * (1 + (rng() - 0.5) * 2 * radialJitter);
-    points.push(destination(start, angle, Math.max(500, radius)));
+    points.push(destination(mitte, angle, Math.max(500, radius)));
   }
   return points;
+}
+
+/**
+ * Wie weit muss ein Ring verbogen werden, damit seine Punkte auf Strassen
+ * liegen? Gemessen in Radiuslaengen, gemittelt ueber alle Punkte.
+ *
+ * Das ist die billigste verfuegbare Auskunft darueber, ob eine Schleife
+ * ueberhaupt in die Gegend passt: sie kostet keine Anfrage. Liegt der halbe
+ * Ring im Meer, im Sperrgebiet oder jenseits des Talendes, zieht das
+ * Aufschnappen die Punkte weit zurueck -- und das sieht man, bevor der erste
+ * Router-Aufruf verbraucht ist.
+ */
+function ringVersatz(soll, ist, radiusM) {
+  if (!ist || ist.length !== soll.length || !soll.length || radiusM <= 0) return 0;
+  let summe = 0;
+  for (let i = 0; i < soll.length; i++) summe += distance(soll[i], ist[i]);
+  return summe / soll.length / radiusM;
 }
 
 /** Zwischenpunkte fuer eine Einwegstrecke: abwechselnd links/rechts der Luftlinie. */
@@ -316,8 +376,17 @@ export async function generateRoutes(
   const failures = [];
   const grundrichtung = mulberry32(seed)() * 360;
   const reichweite = targetDistanceM(durationMin, curviness) / 1.3;
+  // Wie weit faechern die Varianten auf? Ohne Wunschrichtung darf eine Runde
+  // den ganzen Kreis nutzen -- mit Wunschrichtung waeren 360 Grad genau die
+  // Absage an den Wunsch: Variante 1 faehrt dann nach Suedwesten, Variante 2
+  // nach Nordosten. Drei Vorschlaege in derselben Gegend sind das, was
+  // jemand meint, der eine Richtung waehlt.
   const faecher =
-    mode === 'loop' ? 360 : clamp((Math.atan2(14000, reichweite) * 360) / Math.PI, 10, 70);
+    mode === 'loop'
+      ? bearing == null
+        ? 360
+        : 80
+      : clamp((Math.atan2(14000, reichweite) * 360) / Math.PI, 10, 70);
   const faecherMitte = (faecher * (variants - 1)) / (2 * variants);
   const pool = { left: MAX_REPAIRS_TOTAL };
   let lastError = null;
@@ -392,6 +461,7 @@ export async function generateRoutes(
           budget,
           snap,
           maxWaypoints,
+          bearing0Fest: bearing != null,
         });
 
       const produced =
@@ -551,13 +621,48 @@ async function buildLoop({
   budget,
   snap,
   maxWaypoints = 99,
+  bearing0Fest = false,
 }) {
   const { durationMin, curviness } = normalized;
   const twisty = (curviness - 1) / 4;
   const detour = 1.15 + 0.22 * twisty; // Strassen sind laenger als der Idealkreis
   let radius = targetDistanceM(durationMin, curviness) / (2 * Math.PI * detour);
+  // Volle Exzentrizitaet: die Schleife liegt neben dem Start, nicht um ihn.
+  // Gibt die Gegend das nicht her, wird sie unten Schritt fuer Schritt
+  // zurueckgenommen.
+  let exzentrik = START_EXZENTRIK;
+  // Zusatzdrehung, falls die Schleife im Sacktal gelandet ist. Mit
+  // Wunschrichtung faellt sie klein aus -- wer Suedwesten waehlt, will nicht
+  // nach Nordosten geschickt werden, nur weil es dort besser passt.
+  let drehung = 0;
+  let ringNeu = 0;
 
-  let waypoints = snap(ringWaypoints(start, radius, curviness, bearing0, rng, maxWaypoints));
+  // Ring bauen, aufschnappen -- und wenn er sichtbar nicht in die Gegend
+  // passt, naeher an den Start holen und noch einmal. Das kostet keine
+  // Anfrage, also darf es vor dem ersten Routen passieren.
+  // Mit Wunschrichtung wird die Schleife nicht ganz auf den Start
+  // zurueckgezogen: ein Ring rings um den Start ist die Absage an jede
+  // Richtung. Lieber eine kuerzere Runde nach Suedwesten als eine
+  // zeitgenaue, die ueberallhin geht.
+  const exzentrikMin = bearing0Fest ? 0.5 : 0;
+  const setzeRing = () => {
+    for (;;) {
+      const soll = ringWaypoints(
+        start,
+        radius,
+        curviness,
+        bearing0 + drehung,
+        rng,
+        maxWaypoints,
+        exzentrik,
+      );
+      const ist = snap(soll);
+      if (exzentrik <= exzentrikMin || ringVersatz(soll, ist, radius) <= RING_VERSATZ_MAX) return ist;
+      exzentrik = Math.max(exzentrikMin, exzentrik - 0.5);
+    }
+  };
+
+  let waypoints = setzeRing();
   let spurFixes = 0;
   let letzteLaenge = null;
   const out = [];
@@ -604,6 +709,26 @@ async function buildLoop({
       Math.abs(candidate.distanceM - letzteLaenge) / letzteLaenge < FESTGEFAHREN;
     letzteLaenge = candidate.distanceM;
 
+    // Mehr als ein Drittel doppelt heisst nicht "eine Runde mit einem Ast",
+    // sondern "einmal rein ins Tal und denselben Weg zurueck". Einen
+    // einzelnen Wegpunkt zu versetzen bringt dann nichts: es liegt nicht an
+    // einem Punkt, sondern daran, dass die ganze Schleife in einem Tal
+    // steckt, das keine Runde hergibt. Also kleiner legen und woanders
+    // ansetzen -- eine kuerzere echte Runde ist mehr wert als eine
+    // zeitgenaue Strecke, die man zweimal faehrt.
+    if (candidate.overlap > SACKTAL && ringNeu < MAX_RING_NEU) {
+      ringNeu++;
+      // Groesser, nicht kleiner: aus einem Tal fuehrt kein kleiner Kreis
+      // heraus. Der Pass in die Nachbargegend liegt immer weiter draussen
+      // als die Talstrasse, auf der die Schleife gerade steckengeblieben
+      // ist. (Kleiner legen war der naheliegende Griff und hat das
+      // Doppeltfahren im Pruefstand von 32 auf 43 Prozent getrieben.)
+      radius *= 1.3;
+      drehung += bearing0Fest ? 18 : 61;
+      waypoints = setzeRing();
+      continue;
+    }
+
     const stichstrasseMoeglich = spurFixes < MAX_SPUR_FIXES && spurErr > 0;
     // Eine Runde, die zu 80 % doppelt gefahren wird, ist auch mit perfekter
     // Fahrzeit unbrauchbar. Frueher lief diese Reparatur nur, wenn die Zeit
@@ -646,8 +771,17 @@ async function buildLoop({
           continue;
         }
       }
+      // Zu kurz und der groessere Radius bringt nichts mehr? Dann steht die
+      // Schleife an einer Grenze -- Talende, Kueste, Landesgrenze. Sie noch
+      // weiter hinauszuschieben macht es schlimmer; sie zurueck ueber den
+      // Start zu ziehen oeffnet die andere Seite.
+      if (festgefahren && !zuLang && exzentrik > exzentrikMin) {
+        exzentrik = Math.max(exzentrikMin, exzentrik - 0.5);
+        waypoints = setzeRing();
+        continue;
+      }
       radius *= clamp(ratio, 0.6, 1.7) ** 0.9;
-      waypoints = snap(ringWaypoints(start, radius, curviness, bearing0, rng, maxWaypoints));
+      waypoints = setzeRing();
       continue;
     }
     break;
@@ -874,6 +1008,9 @@ function finalize(route, waypoints, request, extra = {}) {
   const verbliebene = waypoints.filter((wp) => isNearPath(wp, bereinigt.coords));
 
   const m = measure(bereinigt);
+  // Braucht den Start, den measure() nicht kennt -- deshalb hier.
+  m.startRevisits =
+    request.mode === 'loop' ? startRevisits(bereinigt.coords, request.start) : 0;
   return {
     id: `route-${++candidateId}`,
     coords: bereinigt.coords,

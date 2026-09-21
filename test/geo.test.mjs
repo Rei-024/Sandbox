@@ -14,6 +14,7 @@ import {
   overlapRatio,
   resample,
   retraceRatio,
+  startRevisits,
   similarity,
   sampleAlong,
   simplify,
@@ -231,6 +232,36 @@ test('exciseSpurs bleibt bei kurzen und entarteten Eingaben ruhig', () => {
   assert.equal(exciseSpurs([FREUDENSTADT]).coords.length, 1);
   const zwei = [FREUDENSTADT, destination(FREUDENSTADT, 0, 100)];
   assert.deepEqual(exciseSpurs(zwei).coords, zwei);
+});
+
+test('startRevisits zaehlt die Acht, nicht die Runde', () => {
+  const kreis = (mitte, radius, von = 0, bis = 360, schritt = 4) => {
+    const out = [];
+    for (let w = von; w <= bis; w += schritt) out.push(destination(mitte, w, radius));
+    return out;
+  };
+
+  // Eine Runde: der Start liegt auf ihrem Rand, unterwegs kommt sie nie
+  // wieder vorbei.
+  const mitte = destination(FREUDENSTADT, 0, 6000);
+  const runde = kreis(mitte, 6000, 180, 540);
+  assert.equal(startRevisits(runde, FREUDENSTADT), 0, 'eine Runde');
+
+  // Eine Acht: zwei Kreise, die sich am Start beruehren.
+  const nord = kreis(destination(FREUDENSTADT, 0, 6000), 6000, 180, 540);
+  const sued = kreis(destination(FREUDENSTADT, 180, 6000), 6000, 0, 360);
+  assert.equal(startRevisits([...nord, ...sued], FREUDENSTADT), 1, 'eine Acht');
+
+  // Drei Schleifen am selben Knoten: zweimal wieder vorbei.
+  const ost = kreis(destination(FREUDENSTADT, 90, 6000), 6000, 270, 630);
+  assert.equal(startRevisits([...nord, ...sued, ...ost], FREUDENSTADT), 2, 'ein Kleeblatt');
+
+  // Ein Ring *um* den Start herum ist trotzdem eine Runde -- er kommt dem
+  // Start nie nahe.
+  assert.equal(startRevisits(kreis(FREUDENSTADT, 9000), FREUDENSTADT), 0, 'Ring um den Start');
+
+  assert.equal(startRevisits([FREUDENSTADT], FREUDENSTADT), 0, 'zu kurz zum Urteilen');
+  assert.equal(startRevisits(null, FREUDENSTADT), 0, 'nichts zu messen');
 });
 
 test('retraceRatio trennt Wendestrecke von Runde', () => {

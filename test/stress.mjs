@@ -10,6 +10,7 @@
  */
 
 import {
+  angleDiff,
   cumulativeDistance,
   distance,
   elevationStats,
@@ -22,6 +23,7 @@ import { snapWaypoints, tollNogos, tollRoadsNear } from '../assets/js/roads.js';
 import { abfrageGebiet } from '../assets/js/app.js';
 import { buildGpx, GOOGLE_MAX_WAYPOINTS, googleMapsUrl } from '../assets/js/export.js';
 import { FakeRouter } from './fake-router.mjs';
+import { RoadGraph } from './graph.mjs';
 
 const DURCHLAEUFE = Number(process.argv[2] ?? 200);
 const START = [13.6167, 47.6417];
@@ -127,6 +129,95 @@ function welt(rng, reichweiteM = 16000, korridor = []) {
   }));
 
   return { korridore: punkte, roads, inseln, sackgassen };
+}
+
+/**
+ * Eine Alpenwelt: ein Talort als Knoten, von dem Taeler sternfoermig
+ * weggehen.
+ *
+ * Die offene Welt oben ist rundherum vernetzt -- dort ist jede Runde eine
+ * Runde. Hier nicht: benachbarte Talkoepfe sind nur manchmal durch einen
+ * Pass verbunden, sonst fuehrt der einzige Weg von einem Tal ins naechste
+ * durch den Startort zurueck. Genau das erzeugt die Acht, ueber die sich
+ * kein Testlauf in einer symmetrischen Scheibenwelt je beschwert haette.
+ *
+ * Ausserdem endet ein Teil der Taeler als Lutscher: langer Stiel, kleine
+ * Wendeschleife am Kopf. Ein reines Hin-und-Zurueck ist leicht zu erkennen;
+ * diese Form ist der schwierige Fall.
+ */
+function talwelt(rng, reichweiteM = 16000) {
+  const punkte = [];
+  const kanten = [];
+  const hoehe = (p) => 500 + 300 * Math.sin(p[0] * 60) + 200 * Math.cos(p[1] * 60);
+  // Die Kurven stecken hier in der Strasse, nicht im Router: gefahren wird
+  // spaeter auf genau diesen Punkten, also muessen sie so liegen, wie eine
+  // Talstrasse liegt -- geschlaengelt, nicht schnurgerade.
+  const strecke = (a, b, schritt = 120, welligkeit = 0.5) => {
+    const laenge = distance(a, b);
+    const n = Math.max(2, Math.round(laenge / schritt));
+    const quer = bearingZwischen(a, b) + 90;
+    const wellen = Math.max(1, Math.round(laenge / 1200));
+    const amp = welligkeit * Math.min(laenge / (8 * wellen), 400);
+    let vorher = null;
+    for (let s = 0; s <= n; s++) {
+      const t = s / n;
+      const basis = [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t];
+      const p = ziel(basis, quer, amp * Math.sin(2 * Math.PI * wellen * t));
+      const mitHoehe = [p[0], p[1], hoehe(p)];
+      punkte.push(mitHoehe);
+      if (vorher) kanten.push([vorher, mitHoehe]);
+      vorher = mitHoehe;
+    }
+  };
+  const kranz = (mitte, radius, zahl) =>
+    Array.from({ length: zahl }, (_, i) => ziel(mitte, (360 * i) / zahl + rng() * 30, radius * (0.8 + rng() * 0.4)));
+
+  const taeler = 3 + Math.floor(rng() * 2);
+  const koepfe = [];
+  const sackgassen = [];
+  for (let t = 0; t < taeler; t++) {
+    const richtung = (360 * t) / taeler + (rng() - 0.5) * 40;
+    const laenge = reichweiteM * (0.9 + rng() * 1.1);
+    // Die Talstrasse schlaengelt sich, statt schnurgerade zu laufen.
+    let vorher = START;
+    for (let s = 1; s <= 4; s++) {
+      const p = ziel(START, richtung + (rng() - 0.5) * 30, (laenge * s) / 4);
+      strecke(vorher, p);
+      vorher = p;
+    }
+    koepfe.push(vorher);
+
+    if (rng() < 0.35) {
+      // Lutscher: nur eine Wendeschleife am Kopf, sonst nichts.
+      const schleife = kranz(vorher, 700 + rng() * 1500, 5);
+      for (let i = 0; i < schleife.length; i++) {
+        strecke(schleife[i], schleife[(i + 1) % schleife.length]);
+      }
+      strecke(vorher, schleife[0]);
+      sackgassen.push(vorher);
+    } else {
+      // Ein richtiges Netz am Talende.
+      const aussen = kranz(vorher, 4000 + rng() * 5000, 7);
+      for (let i = 0; i < aussen.length; i++) {
+        strecke(aussen[i], aussen[(i + 1) % aussen.length]);
+        strecke(vorher, aussen[i]);
+      }
+    }
+  }
+
+  // Passstrassen zwischen benachbarten Taelern -- aber nicht ueberall.
+  for (let i = 0; i < koepfe.length; i++) {
+    if (rng() < 0.4) strecke(koepfe[i], koepfe[(i + 1) % koepfe.length], 120);
+  }
+
+  const roads = punkte.map((p, i) => ({
+    point: [p[0], p[1]],
+    highway: ['primary', 'secondary', 'tertiary', 'unclassified'][i % 4],
+    toll: rng() < 0.02,
+    name: null,
+  }));
+
+  return { korridore: punkte, roads, inseln: [], sackgassen, kanten };
 }
 
 const bearingZwischen = (a, b) => {
@@ -294,6 +385,8 @@ const overlaps = [];
 const zeitfehler = [];
 const ausfaelle = [];
 const zeitDetail = [];
+const achten = [];
+const richtungsfehler = [];
 
 for (let lauf = 1; lauf <= DURCHLAEUFE; lauf++) {
   const rng = mulberry32(lauf * 2654435761);
@@ -317,11 +410,12 @@ for (let lauf = 1; lauf <= DURCHLAEUFE; lauf++) {
   // Das Strassennetz waechst mit der gewuenschten Rundengroesse -- genau das
   // macht die echte App auch, indem sie den Overpass-Radius mitskaliert.
   const gebiet = abfrageGebiet(anfrage);
-  const w = welt(
-    rng,
-    Math.max(6000, targetDistanceM(anfrage.durationMin, anfrage.curviness) / 6),
-    anfrage.mode === 'oneway' ? gebiet.centers.slice(1) : [],
-  );
+  const reichweite = Math.max(6000, targetDistanceM(anfrage.durationMin, anfrage.curviness) / 6);
+  // Die Haelfte der Runden spielt im Gebirge: Knotenort, Taeler, Sackgassen.
+  const imGebirge = anfrage.mode === 'loop' && rng() < 0.5;
+  const w = imGebirge
+    ? talwelt(rng, reichweite)
+    : welt(rng, reichweite, anfrage.mode === 'oneway' ? gebiet.centers.slice(1) : []);
   const roads = w.roads;
   if (anfrage.mode === 'oneway' && anfrage.endIndex != null) {
     anfrage.end = w.korridore[anfrage.endIndex % w.korridore.length].slice(0, 2);
@@ -332,9 +426,13 @@ for (let lauf = 1; lauf <= DURCHLAEUFE; lauf++) {
 
   const router = new FakeRouter({
     wiggle: 0.2 + rng() * 0.7,
-    corridors: w.korridore.map((p) => [p[0], p[1]]),
+    // Im Gebirge faehrt der Router auf dem echten Graphen. Dann braucht er
+    // weder Korridore noch Inseln: was nicht verbunden ist, ist von selbst
+    // unerreichbar.
+    graph: imGebirge ? new RoadGraph(w.kanten) : null,
+    corridors: imGebirge ? [] : w.korridore.map((p) => [p[0], p[1]]),
     corridorWidthM: 700 + rng() * 600,
-    islands: w.inseln,
+    islands: imGebirge ? [] : w.inseln,
   });
 
   let ergebnis = null;
@@ -377,6 +475,29 @@ for (let lauf = 1; lauf <= DURCHLAEUFE; lauf++) {
     const fehler = Math.abs(ergebnis.best.durationMin - anfrage.durationMin) / anfrage.durationMin;
     zeitfehler.push(fehler);
     zeitDetail.push({ dauer: anfrage.durationMin, kurvig: anfrage.curviness, mode: anfrage.mode, mitZiel: !!anfrage.end, fehler, ist: ergebnis.best.durationMin });
+
+    // Eine Acht ist zwei Runden mit gemeinsamem Knoten -- fahrbar, aber nicht
+    // das, wonach gefragt war.
+    if (anfrage.mode === 'loop') achten.push(ergebnis.best.startRevisits ?? 0);
+
+    // Haelt sich die Route an die Wunschrichtung? Gemessen am Schwerpunkt der
+    // Strecke: liegt er in der gewuenschten Himmelsrichtung vom Start aus?
+    if (anfrage.bearing != null) {
+      const c = ergebnis.best.coords;
+      const mitte = [
+        c.reduce((t, q) => t + q[0], 0) / c.length,
+        c.reduce((t, q) => t + q[1], 0) / c.length,
+      ];
+      const weg = distance(anfrage.start, mitte);
+      // Liegt der Schwerpunkt praktisch auf dem Start, gibt es keine
+      // Richtung zu treffen -- das waere eine Messung des Rundungsfehlers.
+      if (weg > 2000) {
+        richtungsfehler.push({
+          mode: anfrage.mode,
+          ab: Math.abs(angleDiff(bearingZwischen(anfrage.start, mitte), anfrage.bearing)),
+        });
+      }
+    }
   }
 
   fuzzGeometrie(rng, lauf);
@@ -390,6 +511,17 @@ console.log(`Erfolgreich:        ${erfolge}/${DURCHLAEUFE}  (ohne Route: ${fehls
 console.log(`Anfragen je Lauf:   ${(anfragen / DURCHLAEUFE).toFixed(1)}`);
 console.log(`Doppeltfahren:      Median ${overlapPercent(med(overlaps))} %, P90 ${overlapPercent(p90(overlaps))} %`);
 console.log(`Zeitabweichung:     Median ${(med(zeitfehler) * 100).toFixed(0)} %, P90 ${(p90(zeitfehler) * 100).toFixed(0)} %`);
+const mitAcht = achten.filter((x) => x > 0).length;
+console.log(
+  `Achten statt Runde: ${mitAcht}/${achten.length} (${Math.round((mitAcht / Math.max(1, achten.length)) * 100)} %)`,
+);
+for (const art of ['loop', 'oneway']) {
+  const w = richtungsfehler.filter((r) => r.mode === art).map((r) => r.ab);
+  if (!w.length) continue;
+  console.log(
+    `Richtung verfehlt:  ${art.padEnd(7)} Median ${med(w).toFixed(0)}°, P90 ${p90(w).toFixed(0)}° (n=${w.length})`,
+  );
+}
 
 if (process.env.DETAIL) {
   const nachDauer = new Map();
@@ -419,6 +551,24 @@ if (process.env.DETAIL) {
   for (const z of [...zeitDetail].sort((a, b) => b.fehler - a.fehler).slice(0, 10)) {
     console.log(`  gewuenscht ${String(z.dauer).padStart(3)} min -> ${z.ist.toFixed(0).padStart(3)} min  (${(z.fehler * 100).toFixed(0)} %, ${z.mode}${z.mitZiel ? ' mit Ziel' : ''})`);
   }
+}
+
+/*
+ * Obergrenzen statt Wunschwerte. Sie stehen ueber dem, was heute gemessen
+ * wird, aber deutlich unter dem Zustand davor -- gedacht sind sie als
+ * Sperre gegen einen Rueckfall, nicht als Ziel. Wer sie reisst, hat die
+ * Wegpunktlogik verschlechtert, auch wenn kein einzelner Lauf abstuerzt.
+ *
+ * Gemessen am 21.09.2026: Doppeltfahren P90 21 %, Achten 14 %,
+ * Richtung verfehlt (Runde) Median 22 Grad.
+ */
+const budget = [
+  ['Doppeltfahren P90', overlapPercent(p90(overlaps)), 35, '%'],
+  ['Achten-Anteil', Math.round((mitAcht / Math.max(1, achten.length)) * 100), 25, '%'],
+  ['Richtung verfehlt (Runde, Median)', Math.round(med(richtungsfehler.filter((r) => r.mode === 'loop').map((r) => r.ab))), 40, '°'],
+];
+for (const [was, ist, grenze, einheit] of budget) {
+  if (ist > grenze) melde(0, `${was} ueber Budget`, `${ist}${einheit} > ${grenze}${einheit}`);
 }
 
 if (!verstoesse.length) {

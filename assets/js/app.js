@@ -7,6 +7,7 @@
  */
 
 import {
+  angleDiff,
   bearing,
   clamp,
   cumulativeDistance,
@@ -529,6 +530,7 @@ async function run() {
       ...warnings,
       ...(router.notices ?? []),
       ...mautHinweis(best),
+      ...richtungsHinweis(best),
       ...aehnlichkeitsHinweis(candidates),
     ];
     if (alle.length) showAlert(alle.join(' '), 'warn');
@@ -554,6 +556,34 @@ function kartenrand() {
   // die Route soll in den Platz passen, den es danach uebrig laesst.
   const sichtbar = sheet.heightFor(sheet.state);
   return { left: 24, top: 70, right: 24, bottom: Math.min(sichtbar + 16, window.innerHeight * 0.55) };
+}
+
+/**
+ * Hat die Gegend die Wunschrichtung ueberhaupt hergegeben?
+ *
+ * Wer Suedwesten waehlt und eine Runde nach Nordosten bekommt, soll das
+ * nicht selbst auf der Karte entdecken muessen. Gemessen am Schwerpunkt der
+ * Strecke: liegt der in einer voellig anderen Himmelsrichtung als bestellt,
+ * hat die Gegend die Wunschrichtung nicht hergegeben -- ein Sacktal, ein
+ * See, eine Grenze.
+ */
+function richtungsHinweis(candidate) {
+  const wunsch = state.settings.bearing;
+  if (wunsch == null || !state.start || !candidate?.coords?.length) return [];
+  const c = candidate.coords;
+  const mitte = [
+    c.reduce((t, p) => t + p[0], 0) / c.length,
+    c.reduce((t, p) => t + p[1], 0) / c.length,
+  ];
+  // Liegt der Schwerpunkt praktisch auf dem Start, gibt es keine Richtung zu
+  // verfehlen -- das waere eine Meldung ueber den Rundungsfehler.
+  if (distance(state.start, mitte) < 2000) return [];
+  const gefahren = bearing(state.start, mitte);
+  if (Math.abs(angleDiff(gefahren, wunsch)) < 60) return [];
+  return [
+    `Nach ${himmelsrichtung(wunsch)} gab die Gegend keine passende Runde her – ` +
+      `die Strecke führt überwiegend nach ${himmelsrichtung(gefahren)}.`,
+  ];
 }
 
 /**
@@ -832,6 +862,16 @@ function describe(c) {
     );
   }
   if (c.curvature.hairpins > 3) parts.push(`${c.curvature.hairpins} enge Kehren`);
+  // Eine Acht ist fahrbar, aber keine Runde. Im Gebirge ist sie oft das
+  // Beste, was es gibt -- dann soll wenigstens dranstehen, dass man
+  // unterwegs nochmal am Start vorbeikommt.
+  if (c.startRevisits > 0) {
+    parts.push(
+      c.startRevisits === 1
+        ? 'unterwegs einmal wieder am Start vorbei'
+        : `unterwegs ${c.startRevisits}× wieder am Start vorbei`,
+    );
+  }
   // Doppelt gefahrene Strecke ist der ehrlichste Qualitaetsindikator einer
   // Runde -- lieber die Zahl zeigen als sie zu umschreiben.
   const doppelt = overlapPercent(c.overlap);

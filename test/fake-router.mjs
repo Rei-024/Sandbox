@@ -17,6 +17,9 @@ export class FakeRouter {
    * @param {Array<{center: [number, number], radiusM: number}>} deadEnds
    *        Sackgassentaeler: erreichbar, aber nur auf demselben Weg wieder
    *        heraus. Genau daraus entstehen die Stichstrassen.
+   * @param {import('./graph.mjs').RoadGraph} graph
+   *        Echtes Strassennetz. Ist es gesetzt, wird darauf mit Dijkstra
+   *        gefahren statt Luftlinie geschlaengelt.
    * @param {Array<[number, number]>} corridors
    *        Dicht abgetastete Punkte entlang der vorhandenen Strassen. Sind
    *        sie gesetzt, ist alles weiter als corridorWidthM davon entfernt
@@ -33,6 +36,7 @@ export class FakeRouter {
     deadEnds = [],
     corridors = [],
     corridorWidthM = 700,
+    graph = null,
     supportsRoundTrip = false,
     roundTripFails = false,
     maxPoints = 30,
@@ -44,6 +48,11 @@ export class FakeRouter {
     this.deadEnds = deadEnds;
     this.corridors = corridors;
     this.corridorWidthM = corridorWidthM;
+    // Mit Graph faehrt der Router wirklich auf Strassen: was nicht verbunden
+    // ist, ist nicht erreichbar, und aus einer Sackgasse kommt man nur auf
+    // demselben Weg heraus. Ohne Graph bleibt es bei der geschlaengelten
+    // Linie -- die reicht fuer alles, was nicht von der Vernetzung abhaengt.
+    this.graph = graph;
     this.supportsRoundTrip = supportsRoundTrip;
     this.roundTripFails = roundTripFails;
     this.roundTrips = 0;
@@ -125,7 +134,9 @@ export class FakeRouter {
 
     const coords = [];
     for (let i = 1; i < path.length; i++) {
-      const seg = this.#segment(path[i - 1], path[i]);
+      const seg = this.graph
+        ? this.#graphSegment(path[i - 1], path[i], i)
+        : this.#segment(path[i - 1], path[i]);
       coords.push(...(i === 1 ? seg : seg.slice(1)));
     }
     const distanceM = lineLength(coords);
@@ -137,6 +148,23 @@ export class FakeRouter {
       provider: 'fake',
       profileUsed: 'fake',
     };
+  }
+
+  /** Ein Abschnitt entlang des echten Netzes. */
+  #graphSegment(a, b, section) {
+    const va = this.graph.naechster(a);
+    const vb = this.graph.naechster(b);
+    const pfad = va.key && vb.key ? this.graph.weg(va.key, vb.key) : null;
+    if (!pfad) {
+      this.rejections++;
+      const info = classifyBRouterMessage(`target island detected for section ${section}`);
+      throw new RoutingError(info.message, {
+        provider: 'fake',
+        kind: info.kind,
+        section: info.section,
+      });
+    }
+    return pfad;
   }
 
   #segment(a, b) {
